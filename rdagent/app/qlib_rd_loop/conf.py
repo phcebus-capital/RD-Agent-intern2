@@ -30,22 +30,22 @@ class ModelBasePropSetting(BasePropSetting):
     evolving_n: int = 10
     """Number of evolutions"""
 
-    train_start: str = "2008-01-01"
+    train_start: str = "2010-01-01"
     """Start date of the training segment"""
 
-    train_end: str = "2014-12-31"
+    train_end: str = "2018-12-31"
     """End date of the training segment"""
 
-    valid_start: str = "2015-01-01"
+    valid_start: str = "2019-01-01"
     """Start date of the validation segment"""
 
-    valid_end: str = "2016-12-31"
+    valid_end: str = "2020-12-31"
     """End date of the validation segment"""
 
-    test_start: str = "2017-01-01"
+    test_start: str = "2021-01-01"
     """Start date of the test / backtest segment"""
 
-    test_end: Optional[str] = "2020-08-01"
+    test_end: Optional[str] = None
     """End date of the test / backtest segment"""
 
 
@@ -74,22 +74,22 @@ class FactorBasePropSetting(BasePropSetting):
     evolving_n: int = 10
     """Number of evolutions"""
 
-    train_start: str = "2008-01-01"
+    train_start: str = "2010-01-01"
     """Start date of the training segment"""
 
-    train_end: str = "2014-12-31"
+    train_end: str = "2018-12-31"
     """End date of the training segment"""
 
-    valid_start: str = "2015-01-01"
+    valid_start: str = "2019-01-01"
     """Start date of the validation segment"""
 
-    valid_end: str = "2016-12-31"
+    valid_end: str = "2020-12-31"
     """End date of the validation segment"""
 
-    test_start: str = "2017-01-01"
+    test_start: str = "2021-01-01"
     """Start date of the test / backtest segment"""
 
-    test_end: Optional[str] = "2020-08-01"
+    test_end: Optional[str] = None
     """End date of the test / backtest segment"""
 
 
@@ -151,22 +151,22 @@ class QuantBasePropSetting(BasePropSetting):
     action_selection: str = "bandit"
     """Action selection strategy: 'bandit' for bandit-based selection, 'llm' for LLM-based selection, 'random' for random selection"""
 
-    train_start: str = "2008-01-01"
+    train_start: str = "2010-01-01"
     """Start date of the training segment"""
 
-    train_end: str = "2014-12-31"
+    train_end: str = "2018-12-31"
     """End date of the training segment"""
 
-    valid_start: str = "2015-01-01"
+    valid_start: str = "2019-01-01"
     """Start date of the validation segment"""
 
-    valid_end: str = "2016-12-31"
+    valid_end: str = "2020-12-31"
     """End date of the validation segment"""
 
-    test_start: str = "2017-01-01"
+    test_start: str = "2021-01-01"
     """Start date of the test / backtest segment"""
 
-    test_end: Optional[str] = "2020-08-01"
+    test_end: Optional[str] = None
     """End date of the test / backtest segment"""
 
 

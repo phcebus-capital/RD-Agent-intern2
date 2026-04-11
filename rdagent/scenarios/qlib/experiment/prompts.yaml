@@ -75,24 +75,24 @@ qlib_factor_strategy: |-
 qlib_factor_output_format: |-
   Your output should be a pandas dataframe similar to the following example information:
   <class 'pandas.core.frame.DataFrame'>
-  MultiIndex: 40914 entries, (Timestamp('2020-01-02 00:00:00'), 'SH600000') to (Timestamp('2021-12-31 00:00:00'), 'SZ300059')
+  MultiIndex: 40914 entries, (Timestamp('2020-01-02 00:00:00'), '2330') to (Timestamp('2021-12-31 00:00:00'), '2317')
   Data columns (total 1 columns):
-  #   Column            Non-Null Count  Dtype  
-  ---  ------            --------------  -----  
+  #   Column            Non-Null Count  Dtype
+  ---  ------            --------------  -----
   0   your factor name  40914 non-null  float64
   dtypes: float64(1)
   memory usage: <ignore>
   Notice: The non-null count is OK to be different to the total number of entries since some instruments may not have the factor value on some days.
   One possible format of `result.h5` may be like following:
   datetime    instrument
-  2020-01-02  SZ000001     -0.001796
-              SZ000166      0.005780
-              SZ000686      0.004228
-              SZ000712      0.001298
-              SZ000728      0.005330
+  2020-01-02  2330         -0.001796
+              2317          0.005780
+              2454          0.004228
+              2382          0.001298
+              3008          0.005330
                               ...
-  2021-12-31  SZ000750      0.000000
-              SZ000776      0.002459
+  2021-12-31  2412          0.000000
+              2308          0.002459
 
 qlib_factor_simulator: |-
   The factors will be sent into Qlib to train a model to predict the next several days return based on the factor values of the previous days. 
@@ -161,7 +161,7 @@ qlib_factor_from_report_rich_style_description : |-
 qlib_factor_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | CSI300  | LGBModel | Alpha158 Plus | Train: {{ train_start }} to {{ train_end }} <br> Valid: {{ valid_start }} to {{ valid_end }} <br> Test &nbsp;: {{ test_start }} to {{ test_end }} |
+  | TW50    | LGBModel | Alpha158 Plus | Train: {{ train_start }} to {{ train_end }} <br> Valid: {{ valid_start }} to {{ valid_end }} <br> Test &nbsp;: {{ test_start }} to {{ test_end }} |
 
 
 qlib_model_background: |-
@@ -256,4 +256,4 @@ qlib_model_rich_style_description: |-
 qlib_model_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | CSI300  | RDAgent-dev | 20 factors (Alpha158)  | Train: {{ train_start }} to {{ train_end }} <br> Valid: {{ valid_start }} to {{ valid_end }} <br> Test &nbsp;: {{ test_start }} to {{ test_end }} |
+  | TW50    | RDAgent-dev | 20 factors (Alpha158)  | Train: {{ train_start }} to {{ train_end }} <br> Valid: {{ valid_start }} to {{ valid_end }} <br> Test &nbsp;: {{ test_start }} to {{ test_end }} |

@@ -1,8 +1,9 @@
 qlib_init:
-    provider_uri: "~/.qlib/qlib_data/cn_data"
-    region: cn
-market: &market csi300
-benchmark: &benchmark SH000300
+    provider_uri: "~/.qlib/qlib_data/tw_data"
+    region: tw
+
+market: &market tw50
+benchmark: &benchmark TW0050
 
 data_handler_config: &data_handler_config
     start_time: {{ train_start | default("2008-01-01", true) }}
@@ -54,9 +55,9 @@ port_analysis_config: &port_analysis_config
         exchange_kwargs:
             limit_threshold: 0.095
             deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
-            min_cost: 5
+            open_cost: 0.001425   # 0.1425% brokerage (buy)
+            close_cost: 0.004425  # 0.1425% brokerage + 0.3% securities transaction tax (sell)
+            min_cost: 20
 task:
     model:
         class: GeneralPTNN
