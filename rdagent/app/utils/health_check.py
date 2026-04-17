@@ -102,8 +102,8 @@ def env_check():
         chat_api_key = os.getenv("DEEPSEEK_API_KEY")
         chat_model = os.getenv("CHAT_MODEL")
         embedding_model = os.getenv("EMBEDDING_MODEL")
-        embedding_api_key = os.getenv("LITELLM_PROXY_API_KEY")
-        embedding_api_base = os.getenv("LITELLM_PROXY_API_BASE")
+        embedding_api_key = os.getenv("EMBEDDING_OPENAI_API_KEY") or os.getenv("LITELLM_PROXY_API_KEY")
+        embedding_api_base = os.getenv("EMBEDDING_OPENAI_BASE_URL") or os.getenv("LITELLM_PROXY_API_BASE")
         if "DEEPSEEK_API_BASE" in os.environ:
             chat_api_base = os.getenv("DEEPSEEK_API_BASE")
         elif "OPENAI_API_BASE" in os.environ:
@@ -115,8 +115,8 @@ def env_check():
         chat_api_base = os.getenv("OPENAI_API_BASE")
         chat_model = os.getenv("CHAT_MODEL")
         embedding_model = os.getenv("EMBEDDING_MODEL")
-        embedding_api_key = chat_api_key
-        embedding_api_base = chat_api_base
+        embedding_api_key = os.getenv("EMBEDDING_OPENAI_API_KEY") or chat_api_key
+        embedding_api_base = os.getenv("EMBEDDING_OPENAI_BASE_URL") or chat_api_base
     else:
         logger.error("No valid configuration was found, please check your .env file.")
 

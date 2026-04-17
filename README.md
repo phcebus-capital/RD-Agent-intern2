@@ -1,6 +1,9 @@
-# RD-Agent 台股因子工廠
+# RD-Agent 台股因子工廠 & 台指期策略研究
 
-RD-Agent 是微軟開源的 LLM 驅動 R&D 自動化框架。本專案以台股為目標市場，使用 [Qlib](https://github.com/microsoft/qlib) 作為回測引擎，透過 LLM 自動提出因子假設、撰寫程式、執行回測並學習回饋，循環迭代優化量化因子。
+RD-Agent 是微軟開源的 LLM 驅動 R&D 自動化框架。本專案以台灣市場為目標，提供兩大應用：
+
+- **台股因子工廠**：以 [Qlib](https://github.com/microsoft/qlib) 作為回測引擎，透過 LLM 自動提出因子假設、撰寫程式、執行回測並學習回饋，循環迭代優化量化因子。
+- **台指期（TX）策略研究**：以 1 分鐘 K 棒為數據基礎，自動提出信號因子假設、實作並向量化回測，反覆迭代優化日內交易策略。
 
 > 上游原始碼：[microsoft/RD-Agent](https://github.com/microsoft/RD-Agent)｜[📖 文件](https://rdagent.readthedocs.io/en/latest/index.html)
 
@@ -166,7 +169,7 @@ FACTOR_CoSTEER_SELECT_METHOD=random
 
 ---
 
-## 四、啟動因子工廠
+## 四、啟動台股因子工廠
 
 ### 4.1 確認設定
 
@@ -200,7 +203,102 @@ rdagent server_ui --port 19899
 
 ---
 
+## 五、台指期（TX）1 分鐘策略研究
+
+本模組以台指期近月合約的 1 分鐘 K 棒為數據源，透過 RD-Agent 循環自動研究日內信號因子。
+
+### 5.1 資料來源
+
+原始 tick 資料從 [FinMind](https://finmindtrade.com/) 下載，清洗並聚合為 1 分鐘 K 棒後，存放於 `tw-futures-data/data_clean/kbar_1min_clean/`。詳細的資料下載與清洗流程請參閱 [tw-futures-data/README.md](tw-futures-data/README.md)。
+
+| 欄位 | 說明 |
+|------|------|
+| `open` | 開盤價 |
+| `high` | 最高價 |
+| `low` | 最低價 |
+| `close` | 收盤價 |
+| `volume` | 成交量（口） |
+| `session` | 盤別：`day`（日盤 08:45–13:45）/ `night`（夜盤 15:00–隔日 05:00） |
+
+### 5.2 準備資料（執行一次）
+
+```bash
+# 將每日 CSV 合併為 Parquet 供 RD-Agent 使用
+python rdagent/scenarios/futures/prepare_data.py
+```
+
+預設輸出路徑：
+
+| 路徑 | 說明 |
+|------|------|
+| `git_ignore_folder/futures_source_data/data.parquet` | 全量資料集 |
+| `git_ignore_folder/futures_source_data_debug/data.parquet` | 調試資料集（前 60 個交易日） |
+
+可選參數：
+
+```bash
+python rdagent/scenarios/futures/prepare_data.py \
+  --kbar_dir tw-futures-data/data_clean/kbar_1min_clean \
+  --out_dir   git_ignore_folder/futures_source_data \
+  --debug_dir git_ignore_folder/futures_source_data_debug \
+  --debug_days 60
+```
+
+### 5.3 設定環境變數（寫入 `.env`）
+
+```bash
+# 資料目錄
+FUTURES_CoSTEER_data_folder=git_ignore_folder/futures_source_data
+FUTURES_CoSTEER_data_folder_debug=git_ignore_folder/futures_source_data_debug
+
+# 訓練 / 驗證 / 測試區間（以下為預設值，可依需求修改）
+FUTURES_FACTOR_train_start=2020-01-02
+FUTURES_FACTOR_train_end=2022-12-31
+FUTURES_FACTOR_valid_start=2023-01-01
+FUTURES_FACTOR_valid_end=2024-06-30
+FUTURES_FACTOR_test_start=2024-07-01
+# FUTURES_FACTOR_test_end=2026-04-15   # 不填則使用資料最末日
+
+# 每輪 CoSTEER 演化次數（預設 10）
+# FUTURES_FACTOR_evolving_n=10
+```
+
+### 5.4 啟動策略研究循環
+
+```bash
+# 全新開始
+python rdagent/app/futures_rd_loop/factor.py
+
+# 續跑上次的 session
+python rdagent/app/futures_rd_loop/factor.py --path LOG_PATH/__session__/1/0_propose
+
+# 限制執行輪數或時長
+python rdagent/app/futures_rd_loop/factor.py --loop-n 20
+python rdagent/app/futures_rd_loop/factor.py --all-duration 2h
+```
+
+每輪流程：**假設提出 → 因子程式撰寫 → 向量化回測 → Sharpe / 最大回撤回饋 → 下一輪假設**。
+
+### 5.5 LLM 生成的因子格式
+
+每個因子為一個獨立的 `factor.py`，輸入為 `data.parquet`，輸出為 `result.h5`：
+
+```python
+# 輸入
+import pandas as pd
+df = pd.read_parquet("data.parquet")
+# Index: DatetimeIndex（1 分鐘），欄位：open / high / low / close / volume / session
+
+# 輸出（key="signal"）：正值 = 做多信號，負值 = 做空信號，~0 = 空倉
+signal: pd.Series  # 與 df 相同索引
+signal.to_hdf("result.h5", key="signal")
+```
+
+---
+
 ## 完整啟動流程
+
+### 台股因子工廠
 
 ```
 1. conda activate rdagent
@@ -209,4 +307,15 @@ rdagent server_ui --port 19899
 4. rdagent health_check      ← 確認 LLM 及 Docker 正常
 5. bash run.sh               ← 啟動因子工廠（30 輪迭代）
 6. rdagent ui --port 19899 --log-dir log/   ← 監控結果
+```
+
+### 台指期策略研究
+
+```
+1. conda activate rdagent
+2. 設定 .env（OPENAI_API_KEY、FUTURES_CoSTEER_data_folder...）
+3. python rdagent/scenarios/futures/prepare_data.py   ← 準備 Parquet 資料（一次）
+4. rdagent health_check                               ← 確認 LLM 正常
+5. python rdagent/app/futures_rd_loop/factor.py       ← 啟動策略研究循環
+6. rdagent ui --port 19899 --log-dir log/             ← 監控結果
 ```

@@ -24,6 +24,7 @@ from rdagent.core.scenario import Scenario
 from rdagent.log.base import Message
 from rdagent.log.storage import FileStorage
 from rdagent.log.ui.qlib_report_figure import report_figure
+from rdagent.scenarios.futures.experiment import FuturesFactorScenario
 from rdagent.scenarios.general_model.scenario import GeneralModelScenario
 from rdagent.scenarios.kaggle.experiment.scenario import KGScenario
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorScenario
@@ -66,6 +67,7 @@ SIMILAR_SCENARIOS = (
     QlibFactorFromReportScenario,
     QlibQuantScenario,
     KGScenario,
+    FuturesFactorScenario,
 )
 
 
@@ -189,6 +191,8 @@ def get_msgs_until(end_func: Callable[[Message], bool] = lambda _: True):
                             except AttributeError:
                                 sms = msg.content.based_experiments[-1].__dict__["result"]
                             if sms is not None:
+                                if isinstance(sms, dict):
+                                    sms = pd.Series({k: v for k, v in sms.items() if isinstance(v, (int, float))})
                                 if isinstance(
                                     state.scenario,
                                     (
@@ -200,6 +204,8 @@ def get_msgs_until(end_func: Callable[[Message], bool] = lambda _: True):
                                 ):
                                     sms_all = sms
                                     sms = sms.loc[QLIB_SELECTED_METRICS]
+                                else:
+                                    sms_all = sms
                                 sms.name = f"Baseline"
                                 state.metric_series.append(sms)
                                 state.all_metric_series.append(sms_all)
@@ -209,6 +215,8 @@ def get_msgs_until(end_func: Callable[[Message], bool] = lambda _: True):
                             sms = msg.content.result
                         except AttributeError:
                             sms = msg.content.__dict__["result"]
+                        if isinstance(sms, dict):
+                            sms = pd.Series({k: v for k, v in sms.items() if isinstance(v, (int, float))})
                         if isinstance(
                             state.scenario,
                             (
@@ -220,6 +228,8 @@ def get_msgs_until(end_func: Callable[[Message], bool] = lambda _: True):
                         ):
                             sms_all = sms
                             sms = sms.loc[QLIB_SELECTED_METRICS]
+                        else:
+                            sms_all = sms
 
                         sms.name = f"Round {state.lround}"
                         sms_all.name = f"Round {state.lround}"
@@ -466,7 +476,10 @@ def summary_window():
                         fig.update_layout(xaxis_title="Loop Round", yaxis_title=None)
                         st.plotly_chart(fig)
                     else:
-                        metrics_window(df, 1, 4, height=300, colors=["red", "blue", "orange", "green"])
+                        ncols = min(df.shape[1], 4)
+                        nrows = (df.shape[1] + ncols - 1) // ncols
+                        colors = ["red", "blue", "orange", "green"] if df.shape[1] == 4 else None
+                        metrics_window(df, nrows, ncols, height=300, colors=colors)
 
     elif isinstance(state.scenario, GeneralModelScenario):
         with st.container(border=True):
