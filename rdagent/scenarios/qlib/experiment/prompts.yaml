@@ -31,6 +31,39 @@ qlib_factor_interface: |-
   Your python code should follow the interface to better interact with the user's system.
   Your python code should contain the following part: the import part, the function part, and the main part. You should write a main function name: "calculate_{function_name}" and call this function in "if __name__ == __main__" part. Don't write any try-except block in your python code. The user will catch the exception message and provide the feedback to you.
   User will write your python code into a python file and execute the file directly with "python {your_file_name}.py". You should calculate the factor values and save the result into a HDF5(H5) file named "result.h5" in the same directory as your python file. The result file is a HDF5(H5) file containing a pandas dataframe. The index of the dataframe is the "datetime" and "instrument", and the single column name is the factor name,and the value is the factor value. The result file should be saved in the same directory as your python file.
+  The input data is loaded from "daily_pv.h5" with key="data". It is a pandas DataFrame with a MultiIndex of (datetime, instrument).
+  IMPORTANT: All price/volume column names use the '$' prefix (Qlib convention). The available columns are:
+    $open        — open price
+    $close       — close price
+    $high        — high price
+    $low         — low price
+    $volume      — trading volume (shares)
+    $factor      — adjustment factor (adj_close / close) for split/dividend adjustment
+    $market_cap  — market capitalization (available from 2013-04-19, ~20% NaN)
+    $foreign_net — foreign institutional net buy/sell in shares (signed)
+    $trust_net   — trust fund net buy/sell in shares (signed)
+    $dealer_net  — dealer hedging net buy/sell in shares (signed)
+    $mr_cur      — current-month revenue in TWD (當月營收); forward-filled from monthly announcement date (by the 10th of each month)
+    $mr_prev     — previous-month revenue in TWD (上月營收)
+    $mr_yoy      — same-month last-year revenue in TWD (去年當月營收)
+    $mr_mom_pct  — month-over-month revenue change in % (上月比較增減%)
+    $mr_yoy_pct  — year-over-year same-month revenue change in % (去年同月增減%)
+    $mr_cum      — year-to-date cumulative revenue in TWD (當月累計營收)
+    $mr_cum_yoy  — year-to-date cumulative revenue last year in TWD (去年累計營收)
+    $mr_cum_pct  — year-to-date cumulative revenue YoY change in % (前期比較增減%)
+  NOTE: Monthly revenue columns ($mr_*) are forward-filled from the announcement date (10th of the following month, or next trading day). They change at most once per month and are NaN before 2005-02-10.
+  Always access columns with the '$' prefix, e.g. df['$close'], df['$volume']. Never use 'close', 'open', etc. without the '$'.
+  Here is the minimal correct pattern for loading and accessing data:
+  ```python
+  import pandas as pd
+  df = pd.read_hdf('daily_pv.h5', key='data')
+  # df has MultiIndex (datetime, instrument) and columns with '$' prefix:
+  close  = df['$close']    # CORRECT — do NOT write df['close']
+  volume = df['$volume']   # CORRECT — do NOT write df['volume']
+  high   = df['$high']     # CORRECT — do NOT write df['high']
+  low    = df['$low']      # CORRECT — do NOT write df['low']
+  factor = df['$factor']   # CORRECT — do NOT write df['factor']
+  ```
 
 qlib_factor_strategy: |-
   Ensure that for every step of data processing, the data format (including indexes) is clearly explained through comments.
@@ -65,11 +98,26 @@ qlib_factor_strategy: |-
     other_df['datetime'] = pd.to_datetime(other_df['datetime'])
     ```
  
-  5. **Merge operations**:  
+  5. **Merge operations**:
     ```python
     # When merging DataFrames, ensure you are merging on both 'datetime' and 'instrument'.
     # If these are part of the index, reset the index before merging.
     merged_df = pd.merge(df, other_df, on=['datetime', 'instrument'], how='inner')
+    ```
+
+  6. **Time-series rolling/shift per instrument (CRITICAL)**:
+    When applying rolling, shift, or cumulative operations per instrument on a MultiIndex Series,
+    ALWAYS use `group_keys=False` to avoid pandas 2.0+ creating a duplicate 'instrument' index level:
+    ```python
+    # WRONG - causes ValueError: cannot insert instrument, already exists
+    result = series.groupby(level='instrument').apply(lambda x: x.rolling(5).mean())
+
+    # CORRECT - use group_keys=False to prevent duplicate index levels
+    result = series.groupby(level='instrument', group_keys=False).apply(lambda x: x.rolling(5).mean())
+    ```
+    Alternatively, use the built-in `.groupby().transform()` which never adds group keys:
+    ```python
+    result = series.groupby(level='instrument').transform(lambda x: x.rolling(5).mean())
     ```
 
 qlib_factor_output_format: |-

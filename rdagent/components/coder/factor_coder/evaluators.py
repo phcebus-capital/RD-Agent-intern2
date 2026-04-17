@@ -65,9 +65,31 @@ class FactorEvaluatorForCoder(CoSTEEREvaluator):
             ) = implementation.execute()
 
             execution_feedback = re.sub(r"(?<=\D)(,\s+-?\d+\.\d+){50,}(?=\D)", ", ", execution_feedback)
-            factor_feedback.execution_feedback = "\n".join(
+            execution_feedback = "\n".join(
                 [line for line in execution_feedback.split("\n") if "warning" not in line.lower()]
             )
+            # Append actionable hints for known recurring errors so the model can fix them directly.
+            if "cannot insert instrument, already exists" in execution_feedback:
+                execution_feedback += (
+                    "\n\nHINT: This error is caused by pandas 2.0+ groupby().apply() prepending the"
+                    " group key to the index, creating a duplicate 'instrument' level."
+                    " Fix by adding group_keys=False:\n"
+                    "  # WRONG:\n"
+                    "  result = series.groupby(level='instrument').apply(lambda x: x.pct_change(10))\n"
+                    "  # CORRECT:\n"
+                    "  result = series.groupby(level='instrument', group_keys=False).apply(lambda x: x.pct_change(10))\n"
+                    "Or use .transform() which never adds group keys:\n"
+                    "  result = series.groupby(level='instrument').transform(lambda x: x.pct_change(10))"
+                )
+            if "KeyError" in execution_feedback and any(
+                col in execution_feedback for col in ("'close'", "'open'", "'high'", "'low'", "'volume'", "'factor'")
+            ):
+                execution_feedback += (
+                    "\n\nHINT: Column names in daily_pv.h5 always have a '$' prefix (Qlib convention)."
+                    " Use df['$close'], df['$open'], df['$high'], df['$low'], df['$volume'], df['$factor']."
+                    " Never omit the '$'."
+                )
+            factor_feedback.execution_feedback = execution_feedback
 
             # 2. Get factor value feedback
             if gen_df is None:

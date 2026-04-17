@@ -187,12 +187,13 @@ ALPHA158 = {
 
 _TFW = FBWorkspace()  # test feature workspace
 TEST_FEATURE_CODE = """
-import qlib  
-from qlib.data import D  
+import qlib
+from qlib.constant import REG_TW
+from qlib.data import D
 
-qlib.init()  
+qlib.init(provider_uri="~/.qlib/qlib_data/tw_data", region=REG_TW)
 expressions = {experessions}
-df = D.features(["SH600000"], expressions, start_time="2008-01-01", end_time="2020-08-31")
+df = D.features(["1301"], expressions, start_time="2010-01-04", end_time="2015-12-31")
 """
 
 

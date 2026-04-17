@@ -27,6 +27,18 @@ $foreign_net: net buy/sell volume by foreign institutional investors on that day
 $trust_net: net buy/sell volume by investment trust funds (投信) on that day (unit: shares, 股). Positive = net buy, negative = net sell. May be NaN for some days.
 $dealer_net: net buy/sell volume by securities dealers (自營商, hedging only) on that day (unit: shares, 股). Positive = net buy, negative = net sell. May be NaN for some days.
 
+## Monthly revenue data (月營收)
+Monthly revenue is disclosed by listed companies by the 10th of the following month (or the next trading day when the 10th falls on a holiday). All $mr_* columns are forward-filled from the announcement date, so each trading day carries the most recently disclosed figure. Data available from 2005-02-10.
+
+$mr_cur: current-month revenue in TWD (當月營收). Updates once per month on the announcement date.
+$mr_prev: previous-month revenue in TWD (上月營收).
+$mr_yoy: same-month revenue from one year ago in TWD (去年當月營收).
+$mr_mom_pct: month-over-month revenue change in % (上月比較增減%).
+$mr_yoy_pct: year-over-year same-month revenue change in % (去年同月增減%).
+$mr_cum: year-to-date cumulative revenue in TWD (當月累計營收).
+$mr_cum_yoy: year-to-date cumulative revenue from last year in TWD (去年累計營收).
+$mr_cum_pct: year-to-date cumulative revenue YoY change in % (前期比較增減%).
+
 ## Notes on instrument codes
 Stock codes follow Taiwan market convention: 4-digit numeric strings (e.g. "2330" for TSMC, "2317" for Hon Hai).
 ETFs use codes like "0050", "0056".

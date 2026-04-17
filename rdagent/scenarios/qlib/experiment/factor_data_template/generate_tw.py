@@ -82,6 +82,49 @@ def fetch_raw_data() -> tuple:
     return open_, close, high, low, volume, adj_close, market_cap, foreign_net, trust_net, dealer_net
 
 
+def fetch_monthly_revenue() -> tuple:
+    """
+    Fetch monthly revenue (月營收) data from FinLab.
+
+    Announcement schedule:
+        - Monthly revenue is disclosed by the 10th of the following month
+          (or the next trading day when the 10th falls on a holiday).
+        - e.g. September (M09) revenue is announced by October 10th.
+    FinLab's ``index_str_to_date()`` converts the month-string index
+    (e.g. "2023M09") to the actual announcement trading date, making
+    the data immediately usable for point-in-time alignment.
+
+    Returns wide-format DataFrames: index=announcement date, columns=stock_code.
+
+    FinLab field reference:
+        monthly_revenue:當月營收       → current-month revenue (TWD); $mr_cur
+        monthly_revenue:上月營收       → previous-month revenue (TWD); $mr_prev
+        monthly_revenue:去年當月營收   → same month last year revenue (TWD); $mr_yoy
+        monthly_revenue:上月比較增減(%)→ MoM revenue change (%); $mr_mom_pct
+        monthly_revenue:去年同月增減(%)→ YoY revenue change (%); $mr_yoy_pct
+        monthly_revenue:當月累計營收   → YTD cumulative revenue (TWD); $mr_cum
+        monthly_revenue:去年累計營收   → YTD cumulative revenue last year (TWD); $mr_cum_yoy
+        monthly_revenue:前期比較增減(%)→ YTD cumulative revenue YoY change (%); $mr_cum_pct
+    """
+    print("  Fetching monthly revenue - 當月營收...")
+    mr_cur = data.get("monthly_revenue:當月營收").index_str_to_date()
+    print("  Fetching monthly revenue - 上月營收...")
+    mr_prev = data.get("monthly_revenue:上月營收").index_str_to_date()
+    print("  Fetching monthly revenue - 去年當月營收...")
+    mr_yoy = data.get("monthly_revenue:去年當月營收").index_str_to_date()
+    print("  Fetching monthly revenue - 上月比較增減(%)...")
+    mr_mom_pct = data.get("monthly_revenue:上月比較增減(%)").index_str_to_date()
+    print("  Fetching monthly revenue - 去年同月增減(%)...")
+    mr_yoy_pct = data.get("monthly_revenue:去年同月增減(%)").index_str_to_date()
+    print("  Fetching monthly revenue - 當月累計營收...")
+    mr_cum = data.get("monthly_revenue:當月累計營收").index_str_to_date()
+    print("  Fetching monthly revenue - 去年累計營收...")
+    mr_cum_yoy = data.get("monthly_revenue:去年累計營收").index_str_to_date()
+    print("  Fetching monthly revenue - 前期比較增減(%)...")
+    mr_cum_pct = data.get("monthly_revenue:前期比較增減(%)").index_str_to_date()
+    return mr_cur, mr_prev, mr_yoy, mr_mom_pct, mr_yoy_pct, mr_cum, mr_cum_yoy, mr_cum_pct
+
+
 def build_multiindex_df(
     open_: pd.DataFrame,
     close: pd.DataFrame,
@@ -93,6 +136,14 @@ def build_multiindex_df(
     foreign_net: pd.DataFrame,
     trust_net: pd.DataFrame,
     dealer_net: pd.DataFrame,
+    mr_cur: pd.DataFrame | None = None,
+    mr_prev: pd.DataFrame | None = None,
+    mr_yoy: pd.DataFrame | None = None,
+    mr_mom_pct: pd.DataFrame | None = None,
+    mr_yoy_pct: pd.DataFrame | None = None,
+    mr_cum: pd.DataFrame | None = None,
+    mr_cum_yoy: pd.DataFrame | None = None,
+    mr_cum_pct: pd.DataFrame | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     instruments: list | None = None,
@@ -108,13 +159,19 @@ def build_multiindex_df(
         Inclusive end date, e.g. "2023-12-31"
     instruments : list[str], optional
         Stock codes to include. If None, includes all available stocks.
+    mr_* : pd.DataFrame, optional
+        Monthly revenue wide-format DataFrames with announcement dates as index
+        (already converted via ``index_str_to_date()``). Each will be forward-filled
+        to align with the daily trading calendar.
 
     Returns
     -------
     pd.DataFrame
         MultiIndex (datetime, instrument) with columns:
         [$open, $close, $high, $low, $volume, $factor, $market_cap,
-         $foreign_net, $trust_net, $dealer_net]
+         $foreign_net, $trust_net, $dealer_net,
+         $mr_cur, $mr_prev, $mr_yoy, $mr_mom_pct, $mr_yoy_pct,
+         $mr_cum, $mr_cum_yoy, $mr_cum_pct]
 
     Notes
     -----
@@ -124,16 +181,27 @@ def build_multiindex_df(
     $foreign_net = foreign institutional net buy/sell shares (signed, unit: 股)
     $trust_net   = trust fund net buy/sell shares (signed, unit: 股)
     $dealer_net  = dealer hedging net buy/sell shares (signed, unit: 股)
+    $mr_cur      = current-month revenue (TWD, 當月營收); forward-filled from announcement date
+    $mr_prev     = previous-month revenue (TWD, 上月營收)
+    $mr_yoy      = same-month last-year revenue (TWD, 去年當月營收)
+    $mr_mom_pct  = MoM revenue change % (上月比較增減%)
+    $mr_yoy_pct  = YoY revenue change % (去年同月增減%)
+    $mr_cum      = YTD cumulative revenue (TWD, 當月累計營收)
+    $mr_cum_yoy  = YTD cumulative revenue last year (TWD, 去年累計營收)
+    $mr_cum_pct  = YTD cumulative revenue YoY change % (前期比較增減%)
     Rows where all price columns are NaN are dropped (suspended / not yet listed).
     """
     # --- Date filtering ---
-    dfs = [open_, close, high, low, volume, adj_close, market_cap,
-           foreign_net, trust_net, dealer_net]
+    daily_dfs = [open_, close, high, low, volume, adj_close, market_cap,
+                 foreign_net, trust_net, dealer_net]
     if start_date:
-        dfs = [df.loc[start_date:] for df in dfs]
+        daily_dfs = [df.loc[start_date:] for df in daily_dfs]
     if end_date:
-        dfs = [df.loc[:end_date] for df in dfs]
-    open_, close, high, low, volume, adj_close, market_cap, foreign_net, trust_net, dealer_net = dfs
+        daily_dfs = [df.loc[:end_date] for df in daily_dfs]
+    open_, close, high, low, volume, adj_close, market_cap, foreign_net, trust_net, dealer_net = daily_dfs
+
+    # Monthly revenue DataFrames: filter by date range but keep full history for ffill
+    monthly_dfs_raw = [mr_cur, mr_prev, mr_yoy, mr_mom_pct, mr_yoy_pct, mr_cum, mr_cum_yoy, mr_cum_pct]
 
     # --- Instrument filtering ---
     if instruments is not None:
@@ -147,6 +215,12 @@ def build_multiindex_df(
         foreign_net   = foreign_net.reindex(columns=instruments)
         trust_net     = trust_net.reindex(columns=instruments)
         dealer_net    = dealer_net.reindex(columns=instruments)
+        monthly_dfs_raw = [
+            df.reindex(columns=instruments) if df is not None else None
+            for df in monthly_dfs_raw
+        ]
+
+    mr_cur, mr_prev, mr_yoy, mr_mom_pct, mr_yoy_pct, mr_cum, mr_cum_yoy, mr_cum_pct = monthly_dfs_raw
 
     # --- Compute adjustment factor ---
     # $factor = adj_close / close; avoid inf where close is 0 or NaN
@@ -166,21 +240,56 @@ def build_multiindex_df(
         aligned = df.reindex(index=close.index, columns=close.columns)
         return _stack(aligned, col_name)
 
-    combined = pd.concat(
-        [
-            _stack(open_, "$open"),
-            _stack(close, "$close"),
-            _stack(high, "$high"),
-            _stack(low, "$low"),
-            _stack(volume, "$volume"),
-            _stack(factor, "$factor"),
-            _stack_sparse(market_cap,  "$market_cap"),
-            _stack_sparse(foreign_net, "$foreign_net"),
-            _stack_sparse(trust_net,   "$trust_net"),
-            _stack_sparse(dealer_net,  "$dealer_net"),
-        ],
-        axis=1,
-    )
+    def _stack_monthly(df: pd.DataFrame, col_name: str) -> pd.Series:
+        """
+        Align monthly revenue (announcement-date indexed) to daily trading calendar.
+
+        Monthly revenue is announced by the 10th of each month (or next trading day).
+        We reindex to the full daily trading calendar and forward-fill so that every
+        trading day carries the most recently disclosed monthly revenue figure.
+        """
+        # Reindex to close.index (daily trading dates); announcement dates not in the
+        # daily index are first unioned, then removed after ffill to avoid data leakage.
+        daily_idx = close.index
+        combined_idx = daily_idx.union(df.index).sort_values()
+        aligned = df.reindex(index=combined_idx, columns=close.columns).ffill()
+        # Keep only trading dates
+        aligned = aligned.reindex(index=daily_idx)
+        if start_date:
+            aligned = aligned.loc[start_date:]
+        if end_date:
+            aligned = aligned.loc[:end_date]
+        return _stack(aligned, col_name)
+
+    series_list = [
+        _stack(open_, "$open"),
+        _stack(close, "$close"),
+        _stack(high, "$high"),
+        _stack(low, "$low"),
+        _stack(volume, "$volume"),
+        _stack(factor, "$factor"),
+        _stack_sparse(market_cap,  "$market_cap"),
+        _stack_sparse(foreign_net, "$foreign_net"),
+        _stack_sparse(trust_net,   "$trust_net"),
+        _stack_sparse(dealer_net,  "$dealer_net"),
+    ]
+
+    # Append monthly revenue series when provided
+    monthly_col_map = [
+        (mr_cur,     "$mr_cur"),
+        (mr_prev,    "$mr_prev"),
+        (mr_yoy,     "$mr_yoy"),
+        (mr_mom_pct, "$mr_mom_pct"),
+        (mr_yoy_pct, "$mr_yoy_pct"),
+        (mr_cum,     "$mr_cum"),
+        (mr_cum_yoy, "$mr_cum_yoy"),
+        (mr_cum_pct, "$mr_cum_pct"),
+    ]
+    for df_mr, col_name in monthly_col_map:
+        if df_mr is not None:
+            series_list.append(_stack_monthly(df_mr, col_name))
+
+    combined = pd.concat(series_list, axis=1)
 
     # --- Drop rows where all price columns are NaN (stock suspended or not listed yet) ---
     price_cols = ["$open", "$close", "$high", "$low"]
@@ -313,6 +422,14 @@ def dump_qlib_data(
         "$foreign_net": "foreign_net",
         "$trust_net":   "trust_net",
         "$dealer_net":  "dealer_net",
+        "$mr_cur":      "mr_cur",
+        "$mr_prev":     "mr_prev",
+        "$mr_yoy":      "mr_yoy",
+        "$mr_mom_pct":  "mr_mom_pct",
+        "$mr_yoy_pct":  "mr_yoy_pct",
+        "$mr_cum":      "mr_cum",
+        "$mr_cum_yoy":  "mr_cum_yoy",
+        "$mr_cum_pct":  "mr_cum_pct",
     }
     available_fields = {col: name for col, name in field_map.items() if col in df.columns}
 
@@ -373,6 +490,9 @@ def main() -> None:
     print("Fetching raw data from FinLab...")
     open_, close, high, low, volume, adj_close, market_cap, foreign_net, trust_net, dealer_net = fetch_raw_data()
 
+    print("\nFetching monthly revenue data from FinLab...")
+    mr_cur, mr_prev, mr_yoy, mr_mom_pct, mr_yoy_pct, mr_cum, mr_cum_yoy, mr_cum_pct = fetch_monthly_revenue()
+
     # ------------------------------------------------------------------ #
     # Full dataset — adjust start_date to match your subscription depth   #
     # Free tier: ~3 years; paid tier: from ~2000                          #
@@ -381,6 +501,9 @@ def main() -> None:
     df_all = build_multiindex_df(
         open_, close, high, low, volume, adj_close, market_cap,
         foreign_net, trust_net, dealer_net,
+        mr_cur=mr_cur, mr_prev=mr_prev, mr_yoy=mr_yoy,
+        mr_mom_pct=mr_mom_pct, mr_yoy_pct=mr_yoy_pct,
+        mr_cum=mr_cum, mr_cum_yoy=mr_cum_yoy, mr_cum_pct=mr_cum_pct,
         start_date="2010-01-01",
     )
     df_all.to_hdf("./daily_pv_all.h5", key="data")
@@ -400,6 +523,9 @@ def main() -> None:
     df_debug = build_multiindex_df(
         open_, close, high, low, volume, adj_close, market_cap,
         foreign_net, trust_net, dealer_net,
+        mr_cur=mr_cur, mr_prev=mr_prev, mr_yoy=mr_yoy,
+        mr_mom_pct=mr_mom_pct, mr_yoy_pct=mr_yoy_pct,
+        mr_cum=mr_cum, mr_cum_yoy=mr_cum_yoy, mr_cum_pct=mr_cum_pct,
         start_date="2020-01-01",
         end_date="2021-12-31",
         instruments=debug_instruments,
