@@ -1,0 +1,256 @@
+futures_factor_background: |-
+  You are developing quantitative trading strategies for Taiwan Futures (台指期, TX).
+  TX is the TAIEX index futures contract, the most liquid futures product on the Taiwan Futures Exchange (TAIFEX).
+
+  Market characteristics:
+  - Underlying: TAIEX (加權指數), Taiwan's main stock index
+  - Contract: 台股指數近月 FITX*1.TF
+  - Contract multiplier: 200 NTD per index point
+  - Tick size: 1 index point
+  - Typical intraday range: 50 – 300 index points
+  - Trading hours:
+      Day session   (日盤): 08:45 – 13:45 CST
+      Night session (夜盤): 15:00 – 05:00 CST (next calendar day)
+  - Transaction cost: 1.525 index points per side
+      (0.525 pts = 105 NTD commission ÷ 200 NTD/pt;  1 pt = market±1-tick slippage)
+  - Positions carry across sessions and days (每日部位歸零 = No)
+
+  Your task is to design a 1-minute signal that generates actionable long/short signals for intraday TX trading.
+  Both trend-following and mean-reverting approaches are valid.
+  Session-specific behavior (day vs night) is encouraged to explore.
+
+futures_factor_source_data: |-
+  Historical 1-minute OHLCV data for TX (台指期主力合約) is stored in "data.parquet".
+
+  Schema:
+    Index  : pd.DatetimeIndex at 1-minute frequency (e.g., 2020-01-30 08:45:00)
+    Columns:
+      open    float64   Opening price of the 1-min bar (index points)
+      high    float64   Highest price of the 1-min bar
+      low     float64   Lowest price of the 1-min bar
+      close   float64   Closing price of the 1-min bar
+      volume  float64   Volume traded in the 1-min bar (contracts / 口)
+      session str       "day" (08:45–13:45) or "night" (15:00–05:00 next day)
+
+  Data range: 2020-01-30 to 2026-04-03 (~1,500 trading days, ~450,000 1-min bars).
+
+  Loading:
+    import pandas as pd
+    df = pd.read_parquet("data.parquet")
+
+futures_factor_interface: |-
+  Your factor.py must be a self-contained Python script that follows this exact interface:
+
+  Step 1 – Load data:
+      df = pd.read_parquet("data.parquet")
+
+  Step 2 – Compute a signal (pd.Series):
+      - Must share the same DatetimeIndex as df
+      - Positive value  →  Bullish / Long signal
+      - Negative value  →  Bearish / Short signal
+      - Value near 0    →  No position (flat)
+      - Must have NO NaN values (use .fillna(0) before saving)
+      - IMPORTANT: The final `signal` variable MUST be a pd.Series, NOT a pd.DataFrame.
+        If your computation yields a DataFrame, select one column or call .squeeze() to
+        convert it to a Series before the save step.
+
+  Step 3 – Save result (always use this exact block verbatim):
+      # ── type guard ───────────────────────────────────────────────────
+      if isinstance(signal, pd.DataFrame):
+          signal = signal.squeeze()            # only works for single-column DataFrames
+      assert isinstance(signal, pd.Series), (
+          f"signal must be pd.Series before saving, got {type(signal)}"
+      )
+      signal = signal.fillna(0)
+      signal.name = "signal"
+      signal.to_hdf("result.h5", key="signal", mode="w")
+
+  Minimal example:
+  ```python
+  import pandas as pd
+  import numpy as np
+
+  df = pd.read_parquet("data.parquet")
+
+  # 20-bar price momentum
+  signal = df["close"].pct_change(20).fillna(0)
+
+  # ── Save (always copy this block exactly) ────────────────────────────
+  if isinstance(signal, pd.DataFrame):
+      signal = signal.squeeze()
+  assert isinstance(signal, pd.Series), (
+      f"signal must be pd.Series before saving, got {type(signal)}"
+  )
+  signal = signal.fillna(0)
+  signal.name = "signal"
+  signal.to_hdf("result.h5", key="signal", mode="w")
+  ```
+
+  Allowed libraries: pandas, numpy, scipy, scikit-learn, ta (if installed).
+  Do NOT import external data sources or network calls.
+
+futures_factor_output_format: |-
+  Write a file named "result.h5" to the current directory containing a pd.Series:
+    - Key  : "signal"
+    - Type : pd.Series  (NOT pd.DataFrame — saving a DataFrame will cause test failure)
+    - Index: pd.DatetimeIndex (identical to df.index from data.parquet)
+    - dtype: float64
+    - NaN  : NOT allowed (use .fillna(0))
+
+  Common mistake: if your code computes a multi-column intermediate DataFrame and you
+  call .to_hdf() on the DataFrame (or on a single-column DataFrame), the saved object
+  is a DataFrame, not a Series. Always call .squeeze() or select a single column before
+  the save block.
+
+  Verification:
+    signal = pd.read_hdf("result.h5", key="signal")
+    assert isinstance(signal, pd.Series), f"got {type(signal)}"
+    assert signal.name == "signal"
+    assert signal.isna().sum() == 0
+
+futures_factor_simulator: |-
+  The signal is evaluated by a vectorized position-based backtest:
+
+  Backtest settings (FITX*1.TF, 1-minute bars, 2020-01-02 ~ 2026-04-15):
+    1. Position  : sign(signal) → +1 (Long), -1 (Short), 0 (Flat)
+    2. Execution : at the OPEN of the next 1-min bar
+                   Buy  orders filled at market + 1 tick (市價+1檔)
+                   Sell orders filled at market - 1 tick (市價-1檔)
+    3. Cost      : 1.525 pts per side (round-trip = 3.05 pts)
+                   0.525 pts = 105 NTD commission ÷ 200 NTD/pt
+                   1.000 pt  = ±1-tick slippage
+    4. Daily reset: 每日部位歸零 = No — positions carry freely across sessions and days
+
+  Metrics reported (test period only):
+    sharpe           – Annualized Sharpe ratio of 1-min P&L
+    annual_return_pts – Average annual P&L in index points
+    max_drawdown_pts  – Peak-to-trough drawdown in index points
+    n_trades          – Number of completed round-trip trades
+    day_sharpe        – Sharpe for day-session bars only
+    night_sharpe      – Sharpe for night-session bars only
+
+  A good signal has: sharpe > 1.0, max_drawdown_pts > -500, consistent day & night performance.
+
+hypothesis_output_format: |-
+  Respond with a JSON object:
+  {
+      "hypothesis": "<one concise sentence: the signal or rule to test>",
+      "reason": "<detailed reasoning: why this pattern might predict TX price movements>",
+      "concise_reason": "<one-sentence summary of reasoning>",
+      "concise_observation": "<what pattern or prior result prompted this hypothesis>",
+      "concise_justification": "<why this is worth testing now>",
+      "concise_knowledge": "<relevant domain knowledge about TX or intraday futures>"
+  }
+
+hypothesis_specification: |-
+  Consider these TX intraday trading patterns when proposing hypotheses:
+  - Microstructure: volume surges, bid-ask bounce, price reversals after large moves
+  - Session effects: first/last 30 min of day session tend to be more volatile
+  - Momentum vs. mean-reversion at different lookback windows (5, 15, 30, 60 bars)
+  - Volatility signals: ATR-normalized moves, realized volatility breakouts
+  - Volume-price divergence or confirmation (e.g., high volume bar + small price move → reversal)
+  - Night session characteristics: lower liquidity, higher sensitivity to overseas markets
+  - Time-of-day seasonality: specific minutes with systematic bias
+  Focus on signals that generate 5–50 round-trips per day (not too noisy, not too slow).
+
+factor_experiment_output_format: |-
+  Respond with a JSON object where each key is a unique signal name (snake_case, no spaces):
+  {
+      "<signal_name>": {
+          "description": "<what the signal measures and how it predicts price>",
+          "formulation": "<mathematical/algorithmic description>",
+          "variables": {
+              "<param>": "<description and typical value range>"
+          }
+      }
+  }
+
+  Example:
+  {
+      "vwap_deviation_20": {
+          "description": "Deviation of current close from 20-bar VWAP; positive when price is above average (bullish momentum)",
+          "formulation": "vwap = (close * volume).rolling(20).sum() / volume.rolling(20).sum(); signal = (close - vwap) / vwap",
+          "variables": {
+              "lookback": "20 bars (20 minutes)"
+          }
+      }
+  }
+
+hypothesis_and_feedback: |-
+  =========================================================
+  {% for experiment, feedback in trace.hist %}
+  # Trial {{ loop.index }}:
+  ## Hypothesis
+  {{ experiment.hypothesis }}
+  ## Signals Implemented:
+  {% for task in experiment.sub_tasks %}
+  {% if task is not none and task.get_task_brief_information is defined %}
+  {{ task.get_task_brief_information() }}
+  {% endif %}
+  {% endfor %}
+  ## Backtest Result (test period):
+  {% if experiment.result is not none %}
+  Sharpe: {{ experiment.result.get('sharpe', 'N/A') }}  |  Annual Return: {{ experiment.result.get('annual_return_pts', 'N/A') }} pts  |  Max DD: {{ experiment.result.get('max_drawdown_pts', 'N/A') }} pts  |  Trades: {{ experiment.result.get('n_trades', 'N/A') }}  |  Day Sharpe: {{ experiment.result.get('day_sharpe', 'N/A') }}  |  Night Sharpe: {{ experiment.result.get('night_sharpe', 'N/A') }}
+  {% else %}
+  Execution failed.
+  {% endif %}
+  ## Feedback:
+  Observation: {{ feedback.observations }}
+  Hypothesis Evaluation: {{ feedback.hypothesis_evaluation }}
+  Decision (SOTA replacement): {{ feedback.decision }}
+  =========================================================
+  {% endfor %}
+
+last_hypothesis_and_feedback: |-
+  ## Hypothesis
+  {{ experiment.hypothesis }}
+  ## Signals Implemented:
+  {% for task in experiment.sub_tasks %}
+  {% if task is not none and task.get_task_brief_information is defined %}
+  {{ task.get_task_brief_information() }}
+  {% endif %}
+  {% endfor %}
+  ## Backtest Result (test period):
+  {% if experiment.result is not none %}
+  Sharpe: {{ experiment.result.get('sharpe', 'N/A') }}  |  Annual Return: {{ experiment.result.get('annual_return_pts', 'N/A') }} pts  |  Max DD: {{ experiment.result.get('max_drawdown_pts', 'N/A') }} pts  |  Trades: {{ experiment.result.get('n_trades', 'N/A') }}  |  Day Sharpe: {{ experiment.result.get('day_sharpe', 'N/A') }}  |  Night Sharpe: {{ experiment.result.get('night_sharpe', 'N/A') }}
+  {% else %}
+  Execution failed.
+  {% endif %}
+  Observation: {{ feedback.observations }}
+  Evaluation: {{ feedback.hypothesis_evaluation }}
+  Decision (SOTA): {{ feedback.decision }}
+  New Hypothesis: {{ feedback.new_hypothesis }}
+  Reasoning: {{ feedback.reason }}
+
+factor_feedback_generation:
+  system: |-
+    You are an expert quantitative researcher specialising in Taiwan Futures (TX) intraday trading.
+    You are analysing the results of a 1-minute signal/strategy experiment.
+
+    {{ scenario }}
+
+    Evaluate the backtest metrics and provide structured feedback.
+    Respond with a JSON object:
+    {
+        "Observations": "<What the metrics reveal about the signal's behaviour>",
+        "Feedback for Hypothesis": "<Was the hypothesis validated? What worked and what didn't?>",
+        "New Hypothesis": "<Suggested direction for the next experiment>",
+        "Reasoning": "<Why you recommend this new direction>",
+        "Replace Best Result": <true if this Sharpe > SOTA Sharpe AND drawdown is acceptable, else false>
+    }
+
+    Decision rule for "Replace Best Result":
+    - true  if current Sharpe > SOTA Sharpe AND current max_drawdown_pts > SOTA max_drawdown_pts * 1.5
+    - false otherwise (worse Sharpe, or excessive drawdown)
+
+  user: |-
+    ## Current Experiment Hypothesis:
+    {{ hypothesis_text }}
+
+    ## Signals Implemented:
+    {% for task in task_details %}
+    {{ task }}
+    {% endfor %}
+
+    ## Performance Comparison:
+    {{ combined_result }}

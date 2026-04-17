@@ -79,9 +79,16 @@ class LiteLLMAPIBackend(APIBackend):
                 f"{LogColors.MAGENTA}Creating embedding{LogColors.END} for: {input_content_list}",
                 tag="debug_litellm_emb",
             )
+        emb_kwargs: dict[str, Any] = {}
+        if LITELLM_SETTINGS.embedding_openai_api_key:
+            emb_kwargs["api_key"] = LITELLM_SETTINGS.embedding_openai_api_key
+        if LITELLM_SETTINGS.embedding_openai_base_url:
+            emb_kwargs["api_base"] = LITELLM_SETTINGS.embedding_openai_base_url
+
         response = embedding(
             model=model_name,
             input=input_content_list,
+            **emb_kwargs,
         )
         response_list = [data["embedding"] for data in response.data]
         return response_list
