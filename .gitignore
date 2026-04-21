@@ -8,6 +8,9 @@ typescript*
 tmp/
 .ai/
 tw-futures-data/
+test*
+KBar_1m_ML/
+archieve/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
