@@ -19,6 +19,8 @@ hypothesis_gen:
     Please generate the output using the following format and specifications:
     {{ hypothesis_output_format }}
 
+    **Output instructions:** If you need to reason through the problem first, wrap ALL your reasoning inside <think>...</think> tags. After the closing </think> tag, output ONLY the JSON object — no additional text, no explanation, no preamble.
+
   user_prompt: |-
     {% if hypothesis_and_feedback|length == 0 %}
     It is the first round of hypothesis generation. The user has no hypothesis on this scenario yet.

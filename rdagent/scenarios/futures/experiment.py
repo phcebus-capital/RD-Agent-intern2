@@ -10,7 +10,9 @@ Data contract for LLM-generated factor.py:
 
 from __future__ import annotations
 
+import ast
 import os
+import re
 import subprocess
 from copy import deepcopy
 from pathlib import Path
@@ -65,7 +67,7 @@ class FuturesFBWorkspace(FBWorkspace):
 
         self.workspace_path.mkdir(parents=True, exist_ok=True)
         code_path = self.workspace_path / "factor.py"
-        code_path.write_text(self.file_dict["factor.py"])
+        code_path.write_text(self._fix_code(self.file_dict["factor.py"]))
 
         # Symlink every file in the data folder into the workspace.
         # Always replace stale symlinks so that switching between data_type="Debug"
@@ -118,6 +120,17 @@ class FuturesFBWorkspace(FBWorkspace):
             else:
                 feedback += self.OUTPUT_NOT_FOUND
                 return feedback, None
+
+    @staticmethod
+    def _fix_code(code: str) -> str:
+        """Auto-fix common LLM typos that cause SyntaxError."""
+        # Fix 'asert' → 'assert' (most common LLM typo)
+        fixed = re.sub(r'\basert\b', 'assert', code)
+        try:
+            ast.parse(fixed)
+            return fixed
+        except SyntaxError:
+            return code  # Return original; let subprocess capture the real error
 
     @property
     def all_codes(self) -> str:

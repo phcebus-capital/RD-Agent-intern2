@@ -98,6 +98,8 @@ class LiteLLMAPIBackend(APIBackend):
         temperature: float
         max_tokens: int | None
         reasoning_effort: Literal["low", "medium", "high"] | None
+        frequency_penalty: float
+        presence_penalty: float
 
     def get_complete_kwargs(self) -> CompleteKwargs:
         """
@@ -109,6 +111,8 @@ class LiteLLMAPIBackend(APIBackend):
         temperature = LITELLM_SETTINGS.chat_temperature
         max_tokens = LITELLM_SETTINGS.chat_max_tokens
         reasoning_effort = LITELLM_SETTINGS.reasoning_effort
+        frequency_penalty = LITELLM_SETTINGS.chat_frequency_penalty
+        presence_penalty = LITELLM_SETTINGS.chat_presence_penalty
 
         if LITELLM_SETTINGS.chat_model_map:
             for t, mc in LITELLM_SETTINGS.chat_model_map.items():
@@ -123,12 +127,18 @@ class LiteLLMAPIBackend(APIBackend):
                             reasoning_effort = cast(Literal["low", "medium", "high"], mc["reasoning_effort"])
                         else:
                             reasoning_effort = None
+                    if "frequency_penalty" in mc:
+                        frequency_penalty = float(mc["frequency_penalty"])
+                    if "presence_penalty" in mc:
+                        presence_penalty = float(mc["presence_penalty"])
                     break
         return self.CompleteKwargs(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
         )
 
     def _create_chat_completion_inner_function(  # type: ignore[no-untyped-def] # noqa: C901, PLR0912, PLR0915
@@ -159,6 +169,13 @@ class LiteLLMAPIBackend(APIBackend):
         complete_kwargs = self.get_complete_kwargs()
         model = complete_kwargs["model"]
 
+        # Allow per-call overrides for max_tokens and reasoning_budget
+        if "max_tokens" in kwargs:
+            complete_kwargs["max_tokens"] = kwargs.pop("max_tokens")
+        if "reasoning_budget" in kwargs:
+            budget = kwargs.pop("reasoning_budget")
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
         response = completion(
             messages=messages,
             stream=LITELLM_SETTINGS.chat_stream,
@@ -174,6 +191,13 @@ class LiteLLMAPIBackend(APIBackend):
                 logger.info(f"{LogColors.BLUE}assistant:{LogColors.END}", tag="llm_messages")
             content = ""
             finish_reason = None
+            # Safety limit: prevent runaway generation when max_tokens is not set.
+            # Chars ≈ tokens * 4; use max_tokens * 6 as a generous upper bound.
+            _stream_char_limit = (
+                LITELLM_SETTINGS.chat_max_tokens * 6
+                if LITELLM_SETTINGS.chat_max_tokens
+                else 30_000
+            )
             for message in response:
                 if message["choices"][0]["finish_reason"]:
                     finish_reason = message["choices"][0]["finish_reason"]
@@ -184,6 +208,17 @@ class LiteLLMAPIBackend(APIBackend):
                     content += chunk
                     if LITELLM_SETTINGS.log_llm_chat_content:
                         logger.info(LogColors.CYAN + chunk + LogColors.END, raw=True, tag="llm_messages")
+                if len(content) > _stream_char_limit:
+                    logger.warning(
+                        f"Stream safety limit reached ({len(content)} chars > {_stream_char_limit}). "
+                        "Truncating to prevent runaway generation."
+                    )
+                    finish_reason = "length"
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    break
             if LITELLM_SETTINGS.log_llm_chat_content:
                 logger.info("\n", raw=True, tag="llm_messages")
         else:

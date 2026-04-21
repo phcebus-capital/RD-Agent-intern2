@@ -11,8 +11,8 @@ Backtest model:
   - Product      : FITX*1.TF (台股指數近月, TX)
   - Bar size     : 1-minute
   - Position     : sign(signal) → +1 Long / -1 Short / 0 Flat
-  - Execution    : at open of next 1-min bar (市價+1檔 for buys, 市價-1檔 for sells)
-  - Cost per side: 1.525 pts (0.525 pts commission = 105 NTD/lot ÷ 200 NTD/pt + 1 pt slippage)
+  - Execution    : at open of next 1-min bar (no slippage)
+  - Cost per side: 0.525 pts (commission = 105 NTD/lot ÷ 200 NTD/pt, no slippage)
   - Daily reset  : 每日部位歸零 = No (positions carry across sessions and days)
   - Date range   : 2020-01-02 ~ 2026-04-15
 """
@@ -34,7 +34,7 @@ from rdagent.scenarios.futures.experiment import FuturesFactorExperiment
 
 # ─────────────────────── Backtest engine ─────────────────────────────────
 
-def run_backtest(df: pd.DataFrame, signal: pd.Series, cost_pts: float = 1.525) -> dict:
+def run_backtest(df: pd.DataFrame, signal: pd.Series, cost_pts: float = 0.525) -> dict:
     """
     Vectorized position-based backtest for 1-min TX futures.
 
@@ -46,9 +46,7 @@ def run_backtest(df: pd.DataFrame, signal: pd.Series, cost_pts: float = 1.525) -
         Raw signal values (same index as df). Positive=long, negative=short.
     cost_pts : float
         Cost per side in index points:
-          0.525 pts = 105 NTD commission ÷ 200 NTD/pt
-          1.000 pt  = 市價±1檔 slippage (預設買進市價+1檔 / 賣出市價-1檔)
-          Total     = 1.525 pts/side  (default)
+          0.525 pts = 105 NTD commission ÷ 200 NTD/pt (no slippage)
 
     Returns
     -------

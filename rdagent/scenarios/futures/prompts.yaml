@@ -11,8 +11,8 @@ futures_factor_background: |-
   - Trading hours:
       Day session   (日盤): 08:45 – 13:45 CST
       Night session (夜盤): 15:00 – 05:00 CST (next calendar day)
-  - Transaction cost: 1.525 index points per side
-      (0.525 pts = 105 NTD commission ÷ 200 NTD/pt;  1 pt = market±1-tick slippage)
+  - Transaction cost: 0.525 index points per side
+      (0.525 pts = 105 NTD commission ÷ 200 NTD/pt;  no slippage assumed)
   - Positions carry across sessions and days (每日部位歸零 = No)
 
   Your task is to design a 1-minute signal that generates actionable long/short signals for intraday TX trading.
@@ -53,6 +53,46 @@ futures_factor_interface: |-
       - IMPORTANT: The final `signal` variable MUST be a pd.Series, NOT a pd.DataFrame.
         If your computation yields a DataFrame, select one column or call .squeeze() to
         convert it to a Series before the save step.
+
+  Optional enhancements:
+
+  A. Time-of-day filter — mask signal to 0 outside profitable windows:
+      import datetime
+      t = df.index.time
+      # Example: only trade 09:00–13:15 in day session, skip final 30 min
+      day_trade = pd.Series(
+          [(x >= datetime.time(9, 0)) and (x <= datetime.time(13, 15)) for x in t],
+          index=df.index
+      )
+      night_trade = df['session'] == 'night'
+      time_mask = (day_trade & (df['session'] == 'day')) | night_trade
+      signal = signal * time_mask.astype(float)
+
+  B. Trailing stop embedded in signal — force flat when price moves against position:
+      # Vectorized ATR trailing stop (fast, no Python loop):
+      atr = (df['high'] - df['low']).ewm(span=14).mean()
+      raw_pos = np.sign(signal_raw)
+
+      # Rolling peak/trough since last direction change (use groupby on position blocks)
+      pos_blocks = (raw_pos != raw_pos.shift()).cumsum()
+      rolling_high = df['close'].groupby(pos_blocks).cummax()
+      rolling_low  = df['close'].groupby(pos_blocks).cummin()
+
+      stop_long  = df['close'] < rolling_high - 2.0 * atr   # stop out longs
+      stop_short = df['close'] > rolling_low  + 2.0 * atr   # stop out shorts
+
+      signal = signal_raw.copy()
+      signal[(raw_pos > 0) & stop_long]  = 0.0
+      signal[(raw_pos < 0) & stop_short] = 0.0
+
+  C. Session-open / session-close avoidance — avoid first & last N minutes:
+      import datetime
+      t = df.index.time
+      avoid = pd.Series(
+          [(x < datetime.time(9, 0)) or (x > datetime.time(13, 30)) for x in t],
+          index=df.index
+      )
+      signal[avoid & (df['session'] == 'day')] = 0.0
 
   Step 3 – Save result (always use this exact block verbatim):
       # ── type guard ───────────────────────────────────────────────────
@@ -113,12 +153,9 @@ futures_factor_simulator: |-
 
   Backtest settings (FITX*1.TF, 1-minute bars, 2020-01-02 ~ 2026-04-15):
     1. Position  : sign(signal) → +1 (Long), -1 (Short), 0 (Flat)
-    2. Execution : at the OPEN of the next 1-min bar
-                   Buy  orders filled at market + 1 tick (市價+1檔)
-                   Sell orders filled at market - 1 tick (市價-1檔)
-    3. Cost      : 1.525 pts per side (round-trip = 3.05 pts)
+    2. Execution : at the OPEN of the next 1-min bar (no slippage)
+    3. Cost      : 0.525 pts per side (round-trip = 1.05 pts)
                    0.525 pts = 105 NTD commission ÷ 200 NTD/pt
-                   1.000 pt  = ±1-tick slippage
     4. Daily reset: 每日部位歸零 = No — positions carry freely across sessions and days
 
   Metrics reported (test period only):
@@ -152,6 +189,13 @@ hypothesis_specification: |-
   - Night session characteristics: lower liquidity, higher sensitivity to overseas markets
   - Time-of-day seasonality: specific minutes with systematic bias
   Focus on signals that generate 5–50 round-trips per day (not too noisy, not too slow).
+
+  Risk management mechanisms to consider (can greatly reduce max drawdown):
+  - Time filter: avoid first 15 min after day-session open (08:45–09:00) and last 30 min before close (13:15–13:45) when reversals are common; consider separate behavior for night session
+  - ATR trailing stop: once in a position, track rolling peak (long) / trough (short) and exit when price retraces more than 1.5–3× ATR — encodes stop directly in the signal
+  - Volatility gate: suppress signal when realized volatility is too high (> 2× median ATR) or too low (choppy, low-edge environment)
+  - Session break flat: force signal = 0 in the 15-min gap between day close (13:45) and night open (15:00) to avoid stale positions
+  - Drawdown brake: if the signal has accumulated large paper losses in the past N bars, go flat until it recovers — helps avoid momentum chasing into blow-ups
 
 factor_experiment_output_format: |-
   Respond with a JSON object where each key is a unique signal name (snake_case, no spaces):

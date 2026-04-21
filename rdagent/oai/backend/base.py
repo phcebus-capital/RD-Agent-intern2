@@ -43,6 +43,7 @@ class JSONParser:
             self._extract_from_code_block,
             self._fix_python_syntax,
             self._extract_with_fix_combined,
+            self._skip_preamble,
         ]
         self.add_json_in_prompt = add_json_in_prompt
 
@@ -102,6 +103,16 @@ class JSONParser:
             fixed = match.group(1).strip()
 
         return self._direct_parse(fixed)
+
+    def _skip_preamble(self, content: str) -> str:
+        """Strategy 5: Skip verbose preamble text and extract the first JSON object.
+        Handles models that output reasoning before the JSON (without <think> tags).
+        """
+        first_brace = content.find("{")
+        if first_brace <= 0:
+            raise json.JSONDecodeError("No preamble to skip", content, 0)
+        candidate = content[first_brace:]
+        return self._direct_parse(self._fix_python_booleans(candidate))
 
     @staticmethod
     def _fix_python_booleans(json_str: str) -> str:
@@ -684,6 +695,16 @@ class APIBackend(ABC):
 
             if finish_reason is None or finish_reason != "length":
                 break  # we get a full response now.
+            # If the accumulated response is already very long (thinking model degeneration),
+            # stop retrying — feeding garbage back only makes it worse.
+            expected_max_chars = (LLM_SETTINGS.chat_max_tokens or 4096) * 6
+            if len(all_response) > expected_max_chars:
+                logger.warning(
+                    f"Response length ({len(all_response)} chars) far exceeds expected max "
+                    f"({expected_max_chars} chars). Likely degenerate thinking-model output. "
+                    "Stopping retry loop early."
+                )
+                break
             new_messages.append({"role": "assistant", "content": response})
         else:
             raise RuntimeError(f"Failed to continue the conversation after {try_n} retries.")
@@ -700,7 +721,19 @@ class APIBackend(ABC):
                 match = re.match(r"\s*</think>(.*)", all_response, re.DOTALL)
                 if match:
                     all_response = match.group(1)
-                # If no match at all, keep original content
+                else:
+                    # Strategy 3: </think> anywhere mid-response (plain-text thinking without opening tag)
+                    match = re.search(r"</think>(.*)", all_response, re.DOTALL)
+                    if match:
+                        all_response = match.group(1)
+                    elif re.match(r"\s*<think>", all_response):
+                        # Strategy 4: <think> was opened but stream was truncated before </think>.
+                        # Discard the degenerate thinking block and force a retry.
+                        logger.warning(
+                            "Response is an unclosed <think> block (stream truncated mid-thinking). "
+                            "Discarding and raising to trigger retry."
+                        )
+                        raise RuntimeError("Stream truncated inside <think> block, retrying.")
 
         # 3) format checking
         if response_format == {"type": "json_object"} or json_target_type:
