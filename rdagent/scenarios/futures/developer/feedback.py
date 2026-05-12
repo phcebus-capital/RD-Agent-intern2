@@ -33,17 +33,38 @@ class FuturesFactorExperiment2Feedback(Experiment2Feedback):
         hypothesis = exp.hypothesis
         logger.info("Generating feedback for futures experiment …")
 
-        current_result = exp.result
+        current_result = exp.result or {}
         sota_result = (
             exp.based_experiments[-1].result
             if exp.based_experiments
             else None
         )
 
-        current_str = format_result(current_result)
+        current_str = format_result(current_result if current_result else None)
         sota_str = format_result(sota_result)
+
+        # Annotate with quality warnings for the LLM
+        warnings: list[str] = []
+        if current_result.get("has_lookahead_bias"):
+            warnings.append(
+                "⚠ LOOK-AHEAD BIAS DETECTED: The factor uses groupby(date).transform() "
+                "which reads the full day's OHLCV at every bar — this is NOT tradeable. "
+                "This result MUST be rejected regardless of Sharpe."
+            )
+        n_trades = current_result.get("n_trades", 0)
+        test_period = current_result.get("test_period", "")
+        # Estimate years in test period (rough: count characters or use n_positive_years key)
+        n_years_est = len(current_result.get("year_sharpes", {})) or 1
+        min_trades = 100 * n_years_est
+        if n_trades < min_trades:
+            warnings.append(
+                f"⚠ TOO FEW TRADES: only {n_trades} trades over ~{n_years_est} years "
+                f"(minimum {min_trades} required). Strategy likely overfit or near-always flat."
+            )
+
+        warning_str = ("\n\n" + "\n".join(warnings)) if warnings else ""
         combined_result = (
-            f"Current experiment: {current_str}\n"
+            f"Current experiment: {current_str}{warning_str}\n\n"
             f"SOTA (best so far):  {sota_str}"
         )
 

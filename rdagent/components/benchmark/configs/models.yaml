@@ -7,7 +7,7 @@ default:
   top_p: 1.0
   top_k: 1
   max_seq_len: 32768
-  max_out_len: 8192
+  max_out_len: 38912
   batch_size: 16
   tensor_parallel_size: auto  # Will be auto-determined based on GPU count
   gpu_memory_utilization: 0.9

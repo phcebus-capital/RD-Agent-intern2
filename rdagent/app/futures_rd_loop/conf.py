@@ -48,15 +48,31 @@ class FuturesFactorBasePropSetting(BasePropSetting):
         "rdagent.scenarios.futures.developer.feedback.FuturesFactorExperiment2Feedback"
     )
 
+    # ── One-shot strategy seed ────────────────────────────────────────
+    # Set via --strategy / --strategy_file in factor.py, or env FUTURES_FACTOR_initial_strategy.
+    # When non-empty, hypothesis_gen is auto-switched to FuturesFactorHypothesisGenFromStrategy.
+    initial_strategy: str = ""
+
+    # ── Custom baseline ───────────────────────────────────────────────
+    # Path to a factor.py file to use as the comparison baseline instead of a
+    # zero-signal empty experiment.  Set via --baseline_factor in factor.py or
+    # env FUTURES_FACTOR_baseline_factor.
+    baseline_factor: str = ""
+
+    # ── Method-exhaustion guard ───────────────────────────────────────
+    # If a method_type has been tried this many times with no SOTA acceptance,
+    # the hypothesis generator will instruct the LLM to avoid it.
+    max_method_tries: int = 5
+
     # ── Evolution ─────────────────────────────────────────────────────
     evolving_n: int = 10
 
     # ── Data splits ───────────────────────────────────────────────────
-    train_start: str = "2020-01-02"
-    train_end: str = "2022-12-31"
-    valid_start: str = "2023-01-01"
-    valid_end: str = "2024-06-30"
-    test_start: str = "2024-07-01"
+    train_start: str = "2020-01-01"
+    train_end: str = "2021-12-31"
+    valid_start: str = "2022-01-01"
+    valid_end: str = "2021-12-31"
+    test_start: str = "2020-01-01"
     test_end: Optional[str] = "2026-04-15"
 
 

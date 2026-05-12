@@ -68,6 +68,30 @@ class LiteLLMAPIBackend(APIBackend):
         logger.info(f"{LogColors.CYAN}Token count: {LogColors.END} {num_tokens}", tag="debug_litellm_token")
         return num_tokens
 
+    _EMBEDDING_MAX_TOKENS = 10000
+
+    def _truncate_to_token_limit(self, text: str, max_tokens: int) -> str:
+        """Truncate text to fit within the embedding model's token limit."""
+        try:
+            import tiktoken
+            enc = tiktoken.encoding_for_model("text-embedding-3-small")
+        except Exception:
+            try:
+                import tiktoken
+                enc = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                # Fallback: rough character-based truncation (1 token ≈ 4 chars)
+                char_limit = max_tokens * 4
+                return text[:char_limit]
+        tokens = enc.encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+        logger.warning(
+            f"Embedding input truncated from {len(tokens)} to {max_tokens} tokens.",
+            tag="debug_litellm_emb",
+        )
+        return enc.decode(tokens[:max_tokens])
+
     def _create_embedding_inner_function(self, input_content_list: list[str]) -> list[list[float]]:
         """
         Call the embedding function
@@ -85,9 +109,10 @@ class LiteLLMAPIBackend(APIBackend):
         if LITELLM_SETTINGS.embedding_openai_base_url:
             emb_kwargs["api_base"] = LITELLM_SETTINGS.embedding_openai_base_url
 
+        truncated_input = [self._truncate_to_token_limit(t, self._EMBEDDING_MAX_TOKENS) for t in input_content_list]
         response = embedding(
             model=model_name,
-            input=input_content_list,
+            input=truncated_input,
             **emb_kwargs,
         )
         response_list = [data["embedding"] for data in response.data]
@@ -169,6 +194,9 @@ class LiteLLMAPIBackend(APIBackend):
         complete_kwargs = self.get_complete_kwargs()
         model = complete_kwargs["model"]
 
+        if kwargs.pop("skip_temperature", False):
+            complete_kwargs.pop("temperature", None)
+
         # Allow per-call overrides for max_tokens and reasoning_budget
         if "max_tokens" in kwargs:
             complete_kwargs["max_tokens"] = kwargs.pop("max_tokens")
@@ -196,7 +224,7 @@ class LiteLLMAPIBackend(APIBackend):
             _stream_char_limit = (
                 LITELLM_SETTINGS.chat_max_tokens * 6
                 if LITELLM_SETTINGS.chat_max_tokens
-                else 30_000
+                else 100_000
             )
             for message in response:
                 if message["choices"][0]["finish_reason"]:
@@ -263,6 +291,11 @@ class LiteLLMAPIBackend(APIBackend):
             },
             tag="token_cost",
         )
+        if not content and finish_reason != "length":
+            raise RuntimeError(
+                f"Model '{model}' returned an empty response (completion_tokens=0, finish_reason={finish_reason!r}). "
+                "The model may be overloaded or malfunctioning."
+            )
         return content, finish_reason
 
     def supports_response_schema(self) -> bool:

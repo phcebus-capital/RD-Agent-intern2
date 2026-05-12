@@ -104,7 +104,11 @@ class FuturesFBWorkspace(FBWorkspace):
                 exec_ok = True
             except subprocess.CalledProcessError as e:
                 output = e.output.decode(errors="replace")
-                feedback = output[:2000] if len(output) > 2000 else output
+                if len(output) > 3000:
+                    # Keep head (traceback) and tail (final error line); skip bloated middle
+                    feedback = output[:1500] + "\n...[truncated]...\n" + output[-800:]
+                else:
+                    feedback = output
             except subprocess.TimeoutExpired:
                 feedback = f"Timeout after {settings.file_based_execution_timeout}s."
 
@@ -123,9 +127,42 @@ class FuturesFBWorkspace(FBWorkspace):
 
     @staticmethod
     def _fix_code(code: str) -> str:
-        """Auto-fix common LLM typos that cause SyntaxError."""
-        # Fix 'asert' → 'assert' (most common LLM typo)
+        """Auto-fix common LLM coding mistakes before execution."""
         fixed = re.sub(r'\basert\b', 'assert', code)
+
+        # Fix groupby[Series] API misuse: g[series_var].rolling(...)
+        # LLM often writes `g[flow].rolling(...)` intending to apply rolling
+        # within groups. Correct form: series.groupby(...).rolling(...)
+        # Heuristic: if a line matches `<groupby_var>[<local_var>].rolling(`,
+        # and <local_var> is NOT a string literal, rewrite it.
+        lines = fixed.split("\n")
+        # Build a map: varname → groupby expression from earlier lines
+        groupby_vars: dict[str, str] = {}
+        for ln in lines:
+            m = re.match(r'\s*(\w+)\s*=\s*(\w+)\.groupby\((.+)\)', ln)
+            if m:
+                groupby_vars[m.group(1)] = m.group(3)  # var → groupby key expr
+
+        new_lines = []
+        for ln in lines:
+            # Match: varname = groupby_var[series_expr].rolling(...)
+            m = re.match(
+                r'(\s*)(\w+)\s*=\s*(\w+)\[(\w+)\](\.rolling\(.+)',
+                ln,
+            )
+            if (
+                m
+                and m.group(3) in groupby_vars
+                and not re.match(r"""['"]""", m.group(4))  # not a string literal
+            ):
+                indent, lhs, gb_var, series_var, rest = m.groups()
+                key_expr = groupby_vars[gb_var]
+                fixed_ln = f"{indent}{lhs} = {series_var}.groupby({key_expr}, group_keys=False){rest}"
+                new_lines.append(fixed_ln)
+            else:
+                new_lines.append(ln)
+        fixed = "\n".join(new_lines)
+
         try:
             ast.parse(fixed)
             return fixed

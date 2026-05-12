@@ -11,13 +11,41 @@ futures_factor_background: |-
   - Trading hours:
       Day session   (日盤): 08:45 – 13:45 CST
       Night session (夜盤): 15:00 – 05:00 CST (next calendar day)
-  - Transaction cost: 0.525 index points per side
-      (0.525 pts = 105 NTD commission ÷ 200 NTD/pt;  no slippage assumed)
+  - Transaction cost: 1.525 index points per side
+      (1.525 pts = (105 NTD commission + 200 NTD slippage) ÷ 200 NTD/pt)
   - Positions carry across sessions and days (每日部位歸零 = No)
 
   Your task is to design a 1-minute signal that generates actionable long/short signals for intraday TX trading.
   Both trend-following and mean-reverting approaches are valid.
   Session-specific behavior (day vs night) is encouraged to explore.
+
+  Cross-session position holding is fully supported. Consider strategies that enter during the day session
+  and hold through the night, or exploit overnight gap dynamics (night open vs. previous day close).
+  You do NOT need to close positions at session boundaries — a signal that stays non-zero across the
+  13:45 close or the 05:00 close will carry the position into the next session at no extra cost.
+
+  COST BARRIER — read carefully:
+  Round-trip cost is 3.05 pts (610 NTD). To break even on a single trade, the market must move at least
+  3 pts in your favour while you hold. With typical 1-min bar moves of 1–3 pts, this means:
+  - Strategies that flip position every few bars (high-frequency scalping) almost always lose to costs.
+  - A viable strategy must hold positions for at minimum ~20–60 minutes on average, OR must be selective
+    enough (few trades per day) that each trade captures a meaningful directional move.
+  - Target: average profit per round-trip >> 3 pts. With 200–800 trades/year that implies ~5–15 pts/trade.
+
+  LOOK-AHEAD BIAS — forbidden patterns:
+  Never use intraday daily high/low/open/close computed from the FULL day's data at each bar.
+  Specifically, the following code pattern introduces look-ahead bias and will be auto-detected and REJECTED:
+      df['col'].groupby(df.index.date).transform('max')   # ← FORBIDDEN
+      df['col'].groupby(df.index.date).transform('min')   # ← FORBIDDEN
+      df['col'].groupby(df.index.date).transform('first') # ← FORBIDDEN
+  These are look-ahead because at bar t=09:00, this expression already knows the day's high at 13:00.
+  Use only information available up to and including the current bar (rolling windows, cumulative within session, etc.).
+
+  ROBUSTNESS REQUIREMENT:
+  A good strategy must work across multiple market regimes. The evaluation period covers 2020–2026,
+  which includes COVID crash, bull markets, bear markets, sideways, and rate-hike regimes.
+  A strategy that only works in one particular year (regime-specific) is NOT acceptable.
+  Target: positive Sharpe in at least 4 out of 6 years (2020, 2021, 2022, 2023, 2024, 2025).
 
 futures_factor_source_data: |-
   Historical 1-minute OHLCV data for TX (台指期主力合約) is stored in "data.parquet".
@@ -68,24 +96,7 @@ futures_factor_interface: |-
       time_mask = (day_trade & (df['session'] == 'day')) | night_trade
       signal = signal * time_mask.astype(float)
 
-  B. Trailing stop embedded in signal — force flat when price moves against position:
-      # Vectorized ATR trailing stop (fast, no Python loop):
-      atr = (df['high'] - df['low']).ewm(span=14).mean()
-      raw_pos = np.sign(signal_raw)
-
-      # Rolling peak/trough since last direction change (use groupby on position blocks)
-      pos_blocks = (raw_pos != raw_pos.shift()).cumsum()
-      rolling_high = df['close'].groupby(pos_blocks).cummax()
-      rolling_low  = df['close'].groupby(pos_blocks).cummin()
-
-      stop_long  = df['close'] < rolling_high - 2.0 * atr   # stop out longs
-      stop_short = df['close'] > rolling_low  + 2.0 * atr   # stop out shorts
-
-      signal = signal_raw.copy()
-      signal[(raw_pos > 0) & stop_long]  = 0.0
-      signal[(raw_pos < 0) & stop_short] = 0.0
-
-  C. Session-open / session-close avoidance — avoid first & last N minutes:
+  B. Session-open / session-close avoidance — avoid first & last N minutes:
       import datetime
       t = df.index.time
       avoid = pd.Series(
@@ -129,6 +140,57 @@ futures_factor_interface: |-
   Allowed libraries: pandas, numpy, scipy, scikit-learn, ta (if installed).
   Do NOT import external data sources or network calls.
 
+  STRICTLY NO LOOK-AHEAD BIAS: Every value in the signal at bar t must be computable
+  using ONLY information available up to and including bar t.  The most common violation
+  is using a groupby-then-transform aggregation that leaks future bars within the same
+  group (e.g. same trading day).  Use the expanding/rolling equivalents instead:
+
+    WRONG  (leaks future data within the day):
+      high.groupby(df['date']).transform('max')   # uses the full day's high — future bars!
+      close.groupby(df['date']).transform('mean') # uses the full day's average
+      volume.groupby(df['date']).transform('sum')  # uses the full day's total volume
+
+    CORRECT (only past bars up to the current bar):
+      high.groupby(df['date']).cummax()            # running max within the day up to bar t
+      close.groupby(df['date']).expanding().mean().reset_index(level=0, drop=True)
+      volume.groupby(df['date']).cumsum()          # running cumulative sum
+
+  Other common look-ahead patterns to avoid:
+    WRONG : signal = close / close.groupby(df['date']).transform('last')   # leaks session close
+    WRONG : signal = (close - close.mean())                                # uses full-series mean
+    WRONG : signal = pd.DataFrame({'s': signal}).assign(
+                         s2=lambda x: x['s'].shift(-1))['s2']             # negative shift = future
+    CORRECT: always use .rolling(N), .expanding(), .cumsum(), .cummax(),
+             .cummin() — or shift with a positive lag .shift(1) to align
+             a computed value to the bar *after* it was known.
+
+  When in doubt, ask: "Could a trader have computed this number at bar t
+  without knowing any bar after t?"  If the answer is no, the code has
+  look-ahead bias and must be rewritten.
+
+  PANDAS GROUPBY API — critical:
+  A GroupBy object's `[]` operator selects COLUMN NAMES, NOT Series values.
+  To apply rolling within groups, call `.groupby()` directly on the Series:
+
+    WRONG  (tries to use a Series of float values as column names → KeyError):
+      g = df.groupby(df.index.date)
+      flow = (df['close'] - df['open']) * df['volume']
+      M = g[flow].rolling(60).sum()           # g[flow] means "select column named flow"!
+
+    CORRECT (rolling within each day's group):
+      flow = (df['close'] - df['open']) * df['volume']
+      M = flow.groupby(df.index.date, group_keys=False).rolling(60, min_periods=1).sum()
+
+    Also correct for a named column:
+      g['volume'].rolling(60).mean()          # selects 'volume' column by name ← OK
+
+  PROHIBITED: Do NOT implement ATR-based stop loss or take profit logic.
+  This includes trailing stops keyed to ATR multiples, ATR-scaled exit thresholds,
+  or any position-management rule that closes/flips a position based on an ATR
+  distance from entry.  The signal must encode only directional conviction
+  (positive = long, negative = short, ~0 = flat); risk management is handled
+  externally by the backtest framework.
+
 futures_factor_output_format: |-
   Write a file named "result.h5" to the current directory containing a pd.Series:
     - Key  : "signal"
@@ -151,22 +213,25 @@ futures_factor_output_format: |-
 futures_factor_simulator: |-
   The signal is evaluated by a vectorized position-based backtest:
 
-  Backtest settings (FITX*1.TF, 1-minute bars, 2020-01-02 ~ 2026-04-15):
+  Backtest settings (FITX*1.TF, 1-minute bars, 2020-01-01 ~ 2026-04-15):
     1. Position  : sign(signal) → +1 (Long), -1 (Short), 0 (Flat)
     2. Execution : at the OPEN of the next 1-min bar (no slippage)
-    3. Cost      : 0.525 pts per side (round-trip = 1.05 pts)
-                   0.525 pts = 105 NTD commission ÷ 200 NTD/pt
+    3. Cost      : 1.525 pts per side (round-trip = 3.05 pts)
+                   1.525 pts = (105 NTD commission + 200 NTD slippage) ÷ 200 NTD/pt
     4. Daily reset: 每日部位歸零 = No — positions carry freely across sessions and days
 
   Metrics reported (test period only):
-    sharpe           – Annualized Sharpe ratio of 1-min P&L
+    sharpe            – Annualized Sharpe ratio based on DAILY P&L returns × √252
+                        (same methodology as the notebook backtest engine)
     annual_return_pts – Average annual P&L in index points
-    max_drawdown_pts  – Peak-to-trough drawdown in index points
+    max_drawdown_pts  – Peak-to-trough drawdown in index points (cumulative P&L curve)
     n_trades          – Number of completed round-trip trades
-    day_sharpe        – Sharpe for day-session bars only
-    night_sharpe      – Sharpe for night-session bars only
+    day_sharpe        – Daily Sharpe for day-session P&L only
+    night_sharpe      – Daily Sharpe for night-session P&L only
+    year_sharpes      – Per-year Sharpe (daily basis), e.g. {'2020': -0.36, '2021': 0.70, ...}
+    n_positive_years  – Count of years with positive Sharpe
 
-  A good signal has: sharpe > 1.0, max_drawdown_pts > -500, consistent day & night performance.
+  A good signal has: sharpe > 0.5, n_positive_years >= 4, n_trades >= 200.
 
 hypothesis_output_format: |-
   Respond with a JSON object:
@@ -176,26 +241,89 @@ hypothesis_output_format: |-
       "concise_reason": "<one-sentence summary of reasoning>",
       "concise_observation": "<what pattern or prior result prompted this hypothesis>",
       "concise_justification": "<why this is worth testing now>",
-      "concise_knowledge": "<relevant domain knowledge about TX or intraday futures>"
+      "concise_knowledge": "<relevant domain knowledge about TX or intraday futures>",
+      "method_type": "<one short label for the signal category, e.g.: momentum | mean_reversion | vwap_based | volume_based | session_based | opening_range_breakout | overnight_gap | volatility_based | bar_shape | cross_session | permutation_entropy | order_book_imbalance | realized_moments | machine_learning | other>"
   }
 
 hypothesis_specification: |-
-  Consider these TX intraday trading patterns when proposing hypotheses:
+  The following are example signal directions to inspire your thinking — treat them as a
+  starting point, NOT an exhaustive list. You are strongly encouraged to propose ideas
+  that go beyond these categories. Novel combinations, regime-conditional logic, or
+  signals derived from bar-shape / session-structure are all welcome.
+
+  Example signal directions (non-exhaustive):
   - Microstructure: volume surges, bid-ask bounce, price reversals after large moves
   - Session effects: first/last 30 min of day session tend to be more volatile
   - Momentum vs. mean-reversion at different lookback windows (5, 15, 30, 60 bars)
-  - Volatility signals: ATR-normalized moves, realized volatility breakouts
+  - Volatility signals: realized volatility breakouts (use rolling std or realised vol, NOT ATR)
   - Volume-price divergence or confirmation (e.g., high volume bar + small price move → reversal)
   - Night session characteristics: lower liquidity, higher sensitivity to overseas markets
   - Time-of-day seasonality: specific minutes with systematic bias
-  Focus on signals that generate 5–50 round-trips per day (not too noisy, not too slow).
+  - Opening range breakout: compute the high/low of the first N minutes of the day session
+    (e.g., 08:45–09:15); trade in the direction of a breakout beyond that range
+  - Overnight gap: compare night-session close to day-session open; test whether the gap
+    tends to fill (mean-revert) or extend (momentum continuation)
+  - VWAP deviation: measure how far close deviates from the rolling VWAP;
+    signal when price is stretched above/below and may revert
+    (formula: vwap = (close * volume).rolling(N).sum() / volume.rolling(N).sum())
+  - Bar-shape proxy: (close - open) / max(high - low, 1) approximates intrabar buying pressure
+    without order-book data; combine with volume for confirmation
+  - Cross-session momentum: use the net direction of the night session as a prior for the
+    first hour of the following day session (continuation or fade)
+  - Permutation Entropy (PE): measure the complexity / randomness of recent price changes by
+    ranking N-bar return patterns into ordinal permutations and computing Shannon entropy.
+    Low PE → market is in a structured (trending/mean-reverting) regime and signals are more
+    reliable; high PE → choppy, suppress signal.
+    Implementation sketch:
+      from itertools import permutations
+      def perm_entropy(x, m=3):
+          # x: 1-D array of length >= m
+          patterns = [tuple(np.argsort(x[i:i+m])) for i in range(len(x)-m+1)]
+          counts = pd.Series(patterns).value_counts(normalize=True)
+          return -np.sum(counts * np.log2(counts + 1e-12))
+      pe = close.rolling(window).apply(lambda x: perm_entropy(x, m=3), raw=True)
+      # Use pe as a regime filter: trade only when pe < pe.rolling(lookback).median()
+  - Order Book Imbalance proxy (no L2 data available — approximate from OHLCV):
+    Since TX 1-min data has no bid/ask, proxy imbalance with bar-level buying pressure:
+      buy_vol  = volume * close_pos          # close_pos = (close-low)/(high-low+ε)
+      sell_vol = volume * (1 - close_pos)
+      obi = (buy_vol - sell_vol) / (buy_vol + sell_vol + ε)   # range [-1, +1]
+    Rolling mean of OBI gives a smoothed demand/supply tilt signal.
+    Alternatively weight by volume: obi_smooth = obi.rolling(N).mean()
+  - Realised skewness / kurtosis of returns: detect distribution shape shifts that precede
+    trend or reversal regimes; use rolling N-bar window (N=30–120)
+  - Entropy of volume distribution: Shannon entropy of the per-bar volume share within a
+    rolling window; low entropy = volume concentrated → likely informative bar
 
   Risk management mechanisms to consider (can greatly reduce max drawdown):
   - Time filter: avoid first 15 min after day-session open (08:45–09:00) and last 30 min before close (13:15–13:45) when reversals are common; consider separate behavior for night session
-  - ATR trailing stop: once in a position, track rolling peak (long) / trough (short) and exit when price retraces more than 1.5–3× ATR — encodes stop directly in the signal
-  - Volatility gate: suppress signal when realized volatility is too high (> 2× median ATR) or too low (choppy, low-edge environment)
+  - Volatility gate: suppress signal when realized volatility is too high or too low (choppy, low-edge environment) — use rolling std or realised vol, NOT ATR
   - Session break flat: force signal = 0 in the 15-min gap between day close (13:45) and night open (15:00) to avoid stale positions
   - Drawdown brake: if the signal has accumulated large paper losses in the past N bars, go flat until it recovers — helps avoid momentum chasing into blow-ups
+
+  STRICTLY PROHIBITED — do NOT propose or implement:
+  - ATR-based stop loss (e.g. "exit when price moves 1.5× ATR against position")
+  - ATR-based take profit (e.g. "exit when price moves 2× ATR in favour")
+  - Any position-exit rule driven by an ATR multiple
+  The signal tensor must encode only directional conviction; all exit logic must
+  come from the signal value itself turning neutral (~0), not from ATR thresholds.
+
+  STRICTLY NO LOOK-AHEAD BIAS — every computation must use only data up to bar t:
+  - WRONG : high.groupby(df['date']).transform('max')   → leaks the full-day high
+  - CORRECT: high.groupby(df['date']).cummax()          → running max up to bar t
+  - WRONG : close.groupby(df['date']).transform('mean') → leaks the full-day mean
+  - CORRECT: close.groupby(df['date']).expanding().mean().reset_index(level=0, drop=True)
+  - WRONG : volume.groupby(df['date']).transform('sum') → leaks full-day volume
+  - CORRECT: volume.groupby(df['date']).cumsum()
+  - Never use negative shifts (shift(-N)) or any operation that reads future bars.
+  Use only .rolling(), .expanding(), .cumsum(), .cummax(), .cummin(), or positive .shift().
+
+  Target backtest profile (use these to judge your hypothesis before finalising):
+  - Overall sharpe > 0.5 (daily-return basis)
+  - max_drawdown_pts > -500 (i.e. drawdown magnitude below 500 pts)
+  - A signal that is strong in one session (day_sharpe or night_sharpe > 1.0) but neutral
+    in the other is acceptable — session-specialised signals are valid
+  - If both day_sharpe and night_sharpe are near zero, the signal likely has no edge
 
 factor_experiment_output_format: |-
   Respond with a JSON object where each key is a unique signal name (snake_case, no spaces):
@@ -226,6 +354,7 @@ hypothesis_and_feedback: |-
   # Trial {{ loop.index }}:
   ## Hypothesis
   {{ experiment.hypothesis }}
+  Method Type: {{ experiment.hypothesis.method_type if experiment.hypothesis and experiment.hypothesis.method_type is defined else "unknown" }}
   ## Signals Implemented:
   {% for task in experiment.sub_tasks %}
   {% if task is not none and task.get_task_brief_information is defined %}
@@ -235,6 +364,8 @@ hypothesis_and_feedback: |-
   ## Backtest Result (test period):
   {% if experiment.result is not none %}
   Sharpe: {{ experiment.result.get('sharpe', 'N/A') }}  |  Annual Return: {{ experiment.result.get('annual_return_pts', 'N/A') }} pts  |  Max DD: {{ experiment.result.get('max_drawdown_pts', 'N/A') }} pts  |  Trades: {{ experiment.result.get('n_trades', 'N/A') }}  |  Day Sharpe: {{ experiment.result.get('day_sharpe', 'N/A') }}  |  Night Sharpe: {{ experiment.result.get('night_sharpe', 'N/A') }}
+  {% if experiment.result.get('year_sharpes') %}Year-by-year: {{ experiment.result['year_sharpes'] }}  |  PositiveYears: {{ experiment.result.get('n_positive_years', '?') }}/{{ experiment.result['year_sharpes']|length }}{% endif %}
+  {% if experiment.result.get('has_lookahead_bias') %}⚠ LOOK-AHEAD BIAS DETECTED{% endif %}
   {% else %}
   Execution failed.
   {% endif %}
@@ -257,6 +388,8 @@ last_hypothesis_and_feedback: |-
   ## Backtest Result (test period):
   {% if experiment.result is not none %}
   Sharpe: {{ experiment.result.get('sharpe', 'N/A') }}  |  Annual Return: {{ experiment.result.get('annual_return_pts', 'N/A') }} pts  |  Max DD: {{ experiment.result.get('max_drawdown_pts', 'N/A') }} pts  |  Trades: {{ experiment.result.get('n_trades', 'N/A') }}  |  Day Sharpe: {{ experiment.result.get('day_sharpe', 'N/A') }}  |  Night Sharpe: {{ experiment.result.get('night_sharpe', 'N/A') }}
+  {% if experiment.result.get('year_sharpes') %}Year-by-year: {{ experiment.result['year_sharpes'] }}  |  PositiveYears: {{ experiment.result.get('n_positive_years', '?') }}/{{ experiment.result['year_sharpes']|length }}{% endif %}
+  {% if experiment.result.get('has_lookahead_bias') %}⚠ LOOK-AHEAD BIAS DETECTED{% endif %}
   {% else %}
   Execution failed.
   {% endif %}
@@ -276,16 +409,25 @@ factor_feedback_generation:
     Evaluate the backtest metrics and provide structured feedback.
     Respond with a JSON object:
     {
-        "Observations": "<What the metrics reveal about the signal's behaviour>",
-        "Feedback for Hypothesis": "<Was the hypothesis validated? What worked and what didn't?>",
-        "New Hypothesis": "<Suggested direction for the next experiment>",
-        "Reasoning": "<Why you recommend this new direction>",
-        "Replace Best Result": <true if this Sharpe > SOTA Sharpe AND drawdown is acceptable, else false>
+        "Observations": "<Interpret the metrics: overall Sharpe, year-by-year stability, session breakdown, trade count. Note any look-ahead bias warnings, ATR stop/take-profit usage, or too-few-trades warnings in the result string.>",
+        "Feedback for Hypothesis": "<Was the hypothesis validated? Did it work across years or only in specific regimes? What failed and why?>",
+        "New Hypothesis": "<Suggested direction for the next experiment. Must NOT use ATR stops, must NOT use groupby(date).transform(), must hold positions long enough to cover 3.05 pts round-trip cost.>",
+        "Reasoning": "<Why you recommend this new direction, referencing the year-by-year performance pattern>",
+        "Replace Best Result": <true or false — see rules below>
     }
 
-    Decision rule for "Replace Best Result":
-    - true  if current Sharpe > SOTA Sharpe AND current max_drawdown_pts > SOTA max_drawdown_pts * 1.5
-    - false otherwise (worse Sharpe, or excessive drawdown)
+    Decision rules for "Replace Best Result":
+    - ALWAYS false if: look-ahead bias detected (LOOKAHEAD_BIAS=YES in result), OR ATR stop/take-profit used, OR n_trades < 200
+    - ALWAYS false if: current Sharpe <= SOTA Sharpe
+    - ALWAYS false if: fewer than 3 years show positive Sharpe (strategy is regime-specific)
+    - ALWAYS false if: current max_drawdown_pts < SOTA max_drawdown_pts * 1.5 (drawdown more than 50% worse)
+    - true ONLY IF: all above conditions pass AND Sharpe is genuinely better than SOTA
+
+    When writing "New Hypothesis", consider why the current approach failed across years:
+    - If year_sharpes shows only 1–2 positive years → the signal is regime-specific; suggest a different signal type
+    - If n_trades is very high (>5000/year) → too much trading, increase signal persistence or threshold
+    - If n_trades is very low (<50/year) → signal is too selective, consider relaxing entry conditions
+    - If day_sharpe and night_sharpe are opposite signs → separate day/night logic may help
 
   user: |-
     ## Current Experiment Hypothesis:

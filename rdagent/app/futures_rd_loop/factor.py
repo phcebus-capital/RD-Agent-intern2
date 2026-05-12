@@ -51,20 +51,50 @@ def main(
     all_duration: Optional[str] = None,
     checkout: bool = True,
     checkout_path: Optional[str] = None,
+    strategy: Optional[str] = None,
+    strategy_file: Optional[str] = None,
+    baseline_factor: Optional[str] = None,
+    baseline_factor_file: Optional[str] = None,
 ) -> None:
     """
     Auto R&D evolving loop for TX 1-min futures strategy research.
 
     Args:
-        path         : Resume from an existing session directory.
-        step_n       : Run exactly this many steps, then stop.
-        loop_n       : Run exactly this many full loops, then stop.
-        all_duration : Stop after this wall-clock duration (e.g. "2h", "30m").
-        checkout     : Whether to checkout the best result at end.
-        checkout_path: Override path for best-result checkout.
+        path                : Resume from an existing session directory.
+        step_n              : Run exactly this many steps, then stop.
+        loop_n              : Run exactly this many full loops, then stop.
+        all_duration        : Stop after this wall-clock duration (e.g. "2h", "30m").
+        checkout            : Whether to checkout the best result at end.
+        checkout_path       : Override path for best-result checkout.
+        strategy            : Inline text description of an initial strategy to seed round 0.
+        strategy_file       : Path to a plain-text file containing the initial strategy.
+        baseline_factor     : Inline Python code for a baseline factor.py to compare against.
+        baseline_factor_file: Path to a factor.py file to use as the comparison baseline.
     """
     if checkout_path is not None:
         checkout = Path(checkout_path)
+
+    # Inject user strategy into settings before constructing the loop
+    if strategy_file is not None:
+        strategy = Path(strategy_file).read_text(encoding="utf-8").strip()
+    if strategy:
+        FUTURES_FACTOR_PROP_SETTING.initial_strategy = strategy
+        FUTURES_FACTOR_PROP_SETTING.hypothesis_gen = (
+            "rdagent.scenarios.futures.proposal.FuturesFactorHypothesisGenFromStrategy"
+        )
+        logger.info(f"[one-shot] Seeding round-0 with user strategy ({len(strategy)} chars).")
+
+    # Inject custom baseline factor
+    # Explicit CLI arg takes precedence; otherwise fall back to the well-known default path.
+    _DEFAULT_BASELINE = Path("git_ignore_folder/baseline_factor.py")
+    if baseline_factor_file is not None:
+        baseline_factor = Path(baseline_factor_file).read_text(encoding="utf-8").strip()
+    elif baseline_factor is None and _DEFAULT_BASELINE.exists():
+        baseline_factor = _DEFAULT_BASELINE.read_text(encoding="utf-8").strip()
+        logger.info(f"[baseline] Auto-loaded default baseline from {_DEFAULT_BASELINE}.")
+    if baseline_factor:
+        FUTURES_FACTOR_PROP_SETTING.baseline_factor = baseline_factor
+        logger.info("[baseline] Custom baseline factor.py loaded.")
 
     if path is None:
         loop = FuturesFactorRDLoop(FUTURES_FACTOR_PROP_SETTING)

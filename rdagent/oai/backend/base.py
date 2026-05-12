@@ -610,6 +610,10 @@ class APIBackend(ABC):
                             logger.warning("Timeout error, please check your network connection.")
                             raise e
 
+                    if hasattr(e, "message") and "temperature" in e.message and "deprecated" in e.message:
+                        kwargs["skip_temperature"] = True
+                        continue
+
                     recommended_wait_seconds = self.retry_wait_seconds
                     if openai_imported and isinstance(e, openai.RateLimitError) and hasattr(e, "message"):
                         match = re.search(r"Please retry after (\d+) seconds\.", e.message)
@@ -697,7 +701,7 @@ class APIBackend(ABC):
                 break  # we get a full response now.
             # If the accumulated response is already very long (thinking model degeneration),
             # stop retrying — feeding garbage back only makes it worse.
-            expected_max_chars = (LLM_SETTINGS.chat_max_tokens or 4096) * 6
+            expected_max_chars = (LLM_SETTINGS.chat_max_tokens or 4096) * 24
             if len(all_response) > expected_max_chars:
                 logger.warning(
                     f"Response length ({len(all_response)} chars) far exceeds expected max "
