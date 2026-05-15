@@ -49,6 +49,19 @@ def check_and_list_free_ports(start_port=19899, max_ports=10) -> None:
 
 
 def test_chat(chat_model, chat_api_key, chat_api_base):
+    backend_cls = os.getenv("BACKEND", "")
+    if "ClaudeCodeSubagentBackend" in backend_cls:
+        # When using ClaudeCodeSubagentBackend, test via APIBackend directly
+        logger.info("🧪 Testing chat via ClaudeCodeSubagentBackend")
+        try:
+            from rdagent.oai.llm_utils import APIBackend
+            resp = APIBackend().build_messages_and_create_chat_completion("Hello!", "You are a helpful assistant.")
+            logger.info(f"✅ Chat test passed.")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Chat test failed: {e}")
+            return False
+
     logger.info(f"🧪 Testing chat model: {chat_model}")
     try:
         if chat_api_base is None:
