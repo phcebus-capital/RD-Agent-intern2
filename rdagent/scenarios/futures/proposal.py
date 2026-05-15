@@ -8,6 +8,7 @@ only the context-preparation and JSON-parsing methods are futures-specific.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from collections import Counter
 from typing import Tuple
 
@@ -29,6 +30,128 @@ class FuturesFactorHypothesis(Hypothesis):
 # ─────────────────────── HypothesisGen ──────────────────────────────────
 
 
+def _format_full_trace_for_meta_llm(trace: Trace) -> str:
+    """Render the full trace into a compact text for the meta-summarization LLM call."""
+    blocks = []
+    for i, (exp, fb) in enumerate(trace.hist, 1):
+        hyp = getattr(exp, "hypothesis", None)
+        mt = getattr(hyp, "method_type", "unknown") if hyp else "unknown"
+        result = exp.result or {}
+        sharpe = result.get("sharpe", "N/A")
+        decision = getattr(fb, "decision", False)
+        obs = getattr(fb, "observations", "")
+
+        signals = []
+        for task in getattr(exp, "sub_tasks", []):
+            name = getattr(task, "factor_name", "")
+            formulation = getattr(task, "factor_formulation", "")
+            if name:
+                signals.append(f"  - {name}: {formulation[:120]}" if formulation else f"  - {name}")
+
+        block = (
+            f"### Trial {i} [{mt}] | Sharpe={sharpe} | SOTA={decision}\n"
+            + ("\n".join(signals) if signals else "  (no signals)")
+            + f"\nFeedback: {str(obs)[:200]}"
+        )
+        blocks.append(block)
+    return "\n\n".join(blocks)
+
+
+def _search_arxiv_for_futures(method_types: list[str], max_results: int = 5) -> str:
+    """Query arxiv API for recent papers on index futures intraday signals.
+
+    Returns formatted abstracts, or empty string on any network/parse error.
+    """
+    import xml.etree.ElementTree as ET
+
+    import requests
+
+    keywords = "index+futures+intraday+signal+microstructure"
+    url = (
+        "http://export.arxiv.org/api/query"
+        f"?search_query=ti:{keywords}"
+        f"&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
+    )
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entries = []
+        for entry in root.findall("atom:entry", ns):
+            title_el = entry.find("atom:title", ns)
+            summary_el = entry.find("atom:summary", ns)
+            if title_el is None or summary_el is None:
+                continue
+            title = title_el.text.strip().replace("\n", " ")
+            summary = summary_el.text.strip().replace("\n", " ")[:300]
+            entries.append(f"- **{title}**\n  {summary}")
+        if not entries:
+            return ""
+        return "### Recent arxiv Research (abstracts)\n" + "\n".join(entries)
+    except Exception:
+        return ""  # never block hypothesis generation on network issues
+
+
+def _generate_strategy_map(trace: Trace) -> str:
+    """Call LLM to produce a structured strategy map from the full trace.
+
+    Also queries arxiv for recent papers to seed the 'encouraged directions' section.
+    """
+    from rdagent.oai.llm_utils import APIBackend
+
+    active_methods = list({
+        getattr(getattr(exp, "hypothesis", None), "method_type", None)
+        for exp, _ in trace.hist[-10:]
+        if getattr(getattr(exp, "hypothesis", None), "method_type", None)
+    })
+    web_context = _search_arxiv_for_futures(active_methods)
+    full_trace = _format_full_trace_for_meta_llm(trace)
+    system_prompt = T("scenarios.futures.prompts:strategy_map_generation.system").r()
+    user_prompt = T("scenarios.futures.prompts:strategy_map_generation.user").r(
+        full_trace=full_trace,
+        web_context=web_context,
+    )
+    return APIBackend().build_messages_and_create_chat_completion(user_prompt, system_prompt, json_mode=False)
+
+
+def _build_method_type_summary(trace: Trace) -> str:
+    """
+    Group trace.hist by method_type and return a compact summary.
+
+    For each method_type, shows: attempt count, best Sharpe, SOTA wins,
+    and the most recent feedback observation — so the LLM understands the
+    landscape without reading every flat trial in sequence.
+    """
+    from collections import defaultdict
+
+    groups: dict[str, list] = defaultdict(list)
+    for exp, fb in trace.hist:
+        mt = getattr(getattr(exp, "hypothesis", None), "method_type", None) or "other"
+        groups[mt].append((exp, fb))
+
+    lines = ["## Method-Type Summary (all rounds grouped)"]
+    for mt, trials in groups.items():
+        sharpes = [
+            t[0].result.get("sharpe")
+            for t in trials
+            if t[0].result and t[0].result.get("sharpe") is not None
+        ]
+        best_sharpe = f"{max(sharpes):.3f}" if sharpes else "N/A"
+        wins = sum(1 for _, fb in trials if fb and fb.decision)
+        last_obs = ""
+        for _, fb in reversed(trials):
+            obs = getattr(fb, "observations", None)
+            if obs:
+                last_obs = obs[:200]
+                break
+        lines.append(
+            f"\n### {mt}  (tried {len(trials)}x | best Sharpe {best_sharpe} | SOTA wins {wins})\n"
+            f"Last observation: {last_obs}"
+        )
+    return "\n".join(lines)
+
+
 def _compute_exhausted_methods(trace: Trace, max_tries: int) -> list[str]:
     """
     Return method_types that have been tried >= max_tries times with zero SOTA wins.
@@ -47,6 +170,9 @@ def _compute_exhausted_methods(trace: Trace, max_tries: int) -> list[str]:
     return [mt for mt, count in tries.items() if count >= max_tries and wins[mt] == 0]
 
 
+STRATEGY_MAP_UPDATE_INTERVAL = 5  # re-generate the strategy map every N rounds
+
+
 class FuturesFactorHypothesisGen(FactorHypothesisGen):
     """
     Proposes a new TX 1-min signal idea based on the experiment history (trace).
@@ -54,15 +180,56 @@ class FuturesFactorHypothesisGen(FactorHypothesisGen):
 
     def __init__(self, scen: Scenario) -> None:
         super().__init__(scen)
+        self._strategy_map: str = ""        # cached LLM-generated strategy map
+        self._strategy_map_round: int = -1  # trace.hist length when map was last generated
+        self._paper_kb = None               # FuturesPaperKnowledgeBase, loaded lazily
+        self._load_paper_kb()
+
+    def _load_paper_kb(self) -> None:
+        from pathlib import Path
+
+        from rdagent.app.futures_rd_loop.conf import FUTURES_FACTOR_PROP_SETTING
+        from rdagent.scenarios.futures.knowledge_management.paper_kb import (
+            FuturesPaperKnowledgeBase,
+        )
+
+        cfg = FUTURES_FACTOR_PROP_SETTING
+        if not cfg.paper_folder:
+            return
+
+        cache = Path(cfg.paper_kb_cache) if cfg.paper_kb_cache else None
+        kb = FuturesPaperKnowledgeBase(path=cache)
+        # PDVectorBase.load() is called in __init__ when path exists; if cache
+        # already had content, vector_df will be populated after load().
+        if kb.shape()[0] == 0:
+            kb.build_from_folder(cfg.paper_folder)
+            if cache:
+                kb.dump()
+        self._paper_kb = kb
 
     def prepare_context(self, trace: Trace) -> Tuple[dict, bool]:
         from rdagent.app.futures_rd_loop.conf import FUTURES_FACTOR_PROP_SETTING
 
-        hypothesis_and_feedback = (
-            T("scenarios.futures.prompts:hypothesis_and_feedback").r(trace=trace)
-            if trace.hist
-            else "No previous experiments yet – this is the first round."
-        )
+        if not trace.hist:
+            hypothesis_and_feedback = "No previous experiments yet – this is the first round."
+        else:
+            n_hist = len(trace.hist)
+            # Regenerate the strategy map every STRATEGY_MAP_UPDATE_INTERVAL rounds,
+            # or on the very first round that has enough history to summarize.
+            rounds_since_update = n_hist - self._strategy_map_round
+            if not self._strategy_map or rounds_since_update >= STRATEGY_MAP_UPDATE_INTERVAL:
+                self._strategy_map = _generate_strategy_map(trace)
+                self._strategy_map_round = n_hist
+
+            # Show the LLM-generated strategy map + recent N trials in detail.
+            recent_n = 5
+            recent_hist = SimpleNamespace(hist=trace.hist[-recent_n:])
+            recent_detail = T("scenarios.futures.prompts:hypothesis_and_feedback").r(trace=recent_hist)
+            hypothesis_and_feedback = (
+                f"{self._strategy_map}\n\n"
+                f"## Recent {min(recent_n, n_hist)} Trials (detailed)\n"
+                f"{recent_detail}"
+            )
 
         last_hypothesis_and_feedback = (
             T("scenarios.futures.prompts:last_hypothesis_and_feedback").r(
@@ -88,6 +255,15 @@ class FuturesFactorHypothesisGen(FactorHypothesisGen):
                 + ", ".join(exhausted)
             )
             rag_hint += exhausted_note
+
+        # Prepend relevant paper excerpts to rag_hint when paper KB is loaded.
+        if self._paper_kb is not None:
+            paper_ctx = self._paper_kb.retrieve(
+                query=f"Taiwan index futures 1-minute intraday signal {rag_hint[:100]}",
+                topk=3,
+            )
+            if paper_ctx:
+                rag_hint = paper_ctx + "\n\n" + rag_hint
 
         return {
             "hypothesis_and_feedback": hypothesis_and_feedback,

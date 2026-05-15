@@ -25,12 +25,16 @@ futures_factor_background: |-
   13:45 close or the 05:00 close will carry the position into the next session at no extra cost.
 
   COST BARRIER — read carefully:
-  Round-trip cost is 3.05 pts (610 NTD). To break even on a single trade, the market must move at least
-  3 pts in your favour while you hold. With typical 1-min bar moves of 1–3 pts, this means:
-  - Strategies that flip position every few bars (high-frequency scalping) almost always lose to costs.
-  - A viable strategy must hold positions for at minimum ~20–60 minutes on average, OR must be selective
-    enough (few trades per day) that each trade captures a meaningful directional move.
-  - Target: average profit per round-trip >> 3 pts. With 200–800 trades/year that implies ~5–15 pts/trade.
+  Round-trip cost is 3.05 pts (610 NTD). The only requirement is that the average profit per
+  completed trade exceeds 3.05 pts in expectation. How you achieve this is flexible:
+  - A high-frequency strategy trading many times per day can work IF each trade captures a
+    large enough move (e.g. momentum bursts, volatility spikes, opening range breakouts).
+  - A low-frequency strategy trading once per day can work with smaller per-bar edge but
+    needs consistent directional conviction.
+  - What NEVER works: near-random entry/exit that relies purely on mean reversion of 1–2 pts,
+    or strategies that flip direction every bar and donate cost on every turn.
+  - Target: E[profit per round-trip] > 3.05 pts. With typical TX intraday volatility of
+    50–300 pts/day, a well-timed entry can easily capture 5–30 pts before reversal.
 
   LOOK-AHEAD BIAS — forbidden patterns:
   Never use intraday daily high/low/open/close computed from the FULL day's data at each bar.
@@ -398,6 +402,42 @@ last_hypothesis_and_feedback: |-
   Decision (SOTA): {{ feedback.decision }}
   New Hypothesis: {{ feedback.new_hypothesis }}
   Reasoning: {{ feedback.reason }}
+
+strategy_map_generation:
+  system: |-
+    You are a quantitative research analyst reviewing a TX 1-min futures strategy research log.
+    Your job is to synthesize the full experiment history into a concise, actionable strategy map
+    that will guide the next round of hypothesis generation.
+
+    Output ONLY a markdown document with exactly two sections:
+
+    ## 已飽和方向（Saturated — do NOT revisit）
+    List specific signal constructions that have been thoroughly explored with consistently poor results.
+    Be concrete: name the exact formulas, parameter choices, or structural patterns that failed.
+    Group related failures together. Each bullet should be specific enough that an engineer would
+    know exactly what NOT to implement.
+
+    ## 鼓勵的探索方向（Encouraged — insufficiently explored）
+    List specific signal ideas that are either untried or only superficially tested.
+    Stay within OHLCV-only constraints (open, high, low, close, volume — no external data).
+    Be concrete: name the feature, describe the intuition, and suggest a testable formulation.
+    Prioritize ideas that are structurally different from the saturated directions above.
+
+    Keep the total output under 600 words. No preamble, no conclusion — just the two sections.
+
+  user: |-
+    Below is the complete experiment history for TX 1-min strategy research.
+    Each trial shows the hypothesis, the signals implemented (name + formulation), the backtest result,
+    and the researcher's feedback.
+
+    {{ full_trace }}
+
+    {% if web_context %}
+    ## Recent Academic Research (for inspiration — use as ideas, not as facts)
+    {{ web_context }}
+    {% endif %}
+
+    Based on this history, produce the strategy map now.
 
 factor_feedback_generation:
   system: |-
