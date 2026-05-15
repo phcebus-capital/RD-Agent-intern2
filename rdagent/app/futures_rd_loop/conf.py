@@ -67,6 +67,12 @@ class FuturesFactorBasePropSetting(BasePropSetting):
     # ── Evolution ─────────────────────────────────────────────────────
     evolving_n: int = 10
 
+    # ── External knowledge (arxiv paper download) ─────────────────────
+    # paper_cache_dir: folder to cache downloaded PDFs and extracted text.
+    # Empty = no caching (re-download every strategy map update).
+    # Set via env FUTURES_FACTOR_paper_cache_dir or --paper_cache_dir CLI flag.
+    paper_cache_dir: str = ""
+
     # ── Data splits ───────────────────────────────────────────────────
     train_start: str = "2020-01-01"
     train_end: str = "2021-12-31"

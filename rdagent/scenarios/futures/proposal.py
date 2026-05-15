@@ -57,60 +57,166 @@ def _format_full_trace_for_meta_llm(trace: Trace) -> str:
     return "\n\n".join(blocks)
 
 
-def _search_arxiv_for_futures(method_types: list[str], max_results: int = 5) -> str:
-    """Query arxiv API for recent papers on index futures intraday signals.
+def _search_arxiv_ids(query: str, n: int = 5) -> list[dict]:
+    """Search arxiv API and return list of {arxiv_id, title}. Empty list on failure.
 
-    Returns formatted abstracts, or empty string on any network/parse error.
+    Strategy: try q-fin.TR first (Trading & Market Microstructure); if too few results,
+    fall back to broader q-fin category so we always get enough candidate papers.
     """
+    import time
     import xml.etree.ElementTree as ET
 
     import requests
 
-    keywords = "index+futures+intraday+signal+microstructure"
-    url = (
-        "http://export.arxiv.org/api/query"
-        f"?search_query=ti:{keywords}"
-        f"&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
-    )
+    def _fetch(search_query: str, max_results: int) -> list[dict]:
+        url = (
+            "https://export.arxiv.org/api/query"
+            f"?search_query={search_query}"
+            f"&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
+        )
+        try:
+            resp = requests.get(url, timeout=20)
+            if resp.status_code == 429:
+                return []
+            if resp.status_code != 200:
+                return []
+            root = ET.fromstring(resp.text)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            results = []
+            for entry in root.findall("atom:entry", ns):
+                id_el = entry.find("atom:id", ns)
+                title_el = entry.find("atom:title", ns)
+                if id_el is None or title_el is None:
+                    continue
+                arxiv_id = id_el.text.strip().split("/")[-1]
+                title = title_el.text.strip().replace("\n", " ")
+                results.append({"arxiv_id": arxiv_id, "title": title})
+            return results
+        except Exception:
+            return []
+
+    words = [t for t in query.split() if t]
+    seen: set[str] = set()
+    results: list[dict] = []
+
+    # Attempt 1: strict — q-fin.TR + all query terms
+    if words:
+        extra = "+AND+".join(f"all:{w}" for w in words)
+        entries = _fetch(f"cat:q-fin.TR+AND+{extra}", n * 2)
+        for e in entries:
+            if e["arxiv_id"] not in seen:
+                seen.add(e["arxiv_id"])
+                results.append(e)
+
+    # Attempt 2: fallback — q-fin.TR alone (recent papers in the category)
+    if len(results) < n:
+        time.sleep(3)  # respect arxiv rate limit between calls
+        entries = _fetch("cat:q-fin.TR", n * 2)
+        for e in entries:
+            if e["arxiv_id"] not in seen:
+                seen.add(e["arxiv_id"])
+                results.append(e)
+
+    # Attempt 3: broader fallback — broader q-fin category + key terms only
+    if len(results) < n and words:
+        time.sleep(3)
+        core_terms = words[:2]  # use only first 2 terms to widen search
+        extra = "+AND+".join(f"all:{w}" for w in core_terms)
+        entries = _fetch(f"cat:q-fin+AND+{extra}", n * 2)
+        for e in entries:
+            if e["arxiv_id"] not in seen:
+                seen.add(e["arxiv_id"])
+                results.append(e)
+
+    return results[:n]
+
+
+def _download_paper_text(arxiv_id: str, max_pages: int = 8, cache_dir: str = "") -> str | None:
+    """Download an arxiv PDF and return extracted text.
+
+    If cache_dir is set, saves {arxiv_id}.pdf and {arxiv_id}.txt on first download
+    and loads from the .txt file on subsequent calls. Returns None on failure.
+    """
+    import io
+    from pathlib import Path
+
+    import fitz
+    import requests
+
+    # Cache hit: load pre-extracted text
+    if cache_dir:
+        txt_path = Path(cache_dir) / f"{arxiv_id}.txt"
+        if txt_path.exists():
+            return txt_path.read_text(encoding="utf-8")
+
     try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.text)
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
-        entries = []
-        for entry in root.findall("atom:entry", ns):
-            title_el = entry.find("atom:title", ns)
-            summary_el = entry.find("atom:summary", ns)
-            if title_el is None or summary_el is None:
-                continue
-            title = title_el.text.strip().replace("\n", " ")
-            summary = summary_el.text.strip().replace("\n", " ")[:300]
-            entries.append(f"- **{title}**\n  {summary}")
-        if not entries:
-            return ""
-        return "### Recent arxiv Research (abstracts)\n" + "\n".join(entries)
+        url = f"https://arxiv.org/pdf/{arxiv_id}"
+        r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        pdf_bytes = r.content
+        doc = fitz.open(stream=io.BytesIO(pdf_bytes), filetype="pdf")
+        text = "".join(page.get_text() for page in doc[:max_pages])
+
+        # Cache miss: persist PDF + extracted text
+        if cache_dir and text:
+            cache_path = Path(cache_dir)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            (cache_path / f"{arxiv_id}.pdf").write_bytes(pdf_bytes)
+            (cache_path / f"{arxiv_id}.txt").write_text(text, encoding="utf-8")
+
+        return text
     except Exception:
-        return ""  # never block hypothesis generation on network issues
+        return None
+
+
+def _fetch_relevant_papers_text(query: str, n_papers: int = 3, max_pages: int = 8) -> str:
+    """Search arxiv and download full text of relevant papers.
+
+    Returns a formatted string with paper contents, or empty string on failure.
+    Never blocks hypothesis generation.
+    """
+    from rdagent.app.futures_rd_loop.conf import FUTURES_FACTOR_PROP_SETTING
+    from rdagent.log import rdagent_logger as logger
+
+    cache_dir = FUTURES_FACTOR_PROP_SETTING.paper_cache_dir
+    candidates = _search_arxiv_ids(query, n=n_papers * 3)
+    if not candidates:
+        return ""
+
+    sections = []
+    for c in candidates:
+        if len(sections) >= n_papers:
+            break
+        text = _download_paper_text(c["arxiv_id"], max_pages=max_pages, cache_dir=cache_dir)
+        if text:
+            logger.info(f"Fetched arxiv:{c['arxiv_id']} ({len(text):,} chars)", tag="paper_rag")
+            sections.append(f"### [{c['title']}]\n\n{text}")
+
+    if not sections:
+        return ""
+    return "## Relevant Academic Papers (full text, first ~8 pages each)\n\n" + "\n\n---\n\n".join(sections)
 
 
 def _generate_strategy_map(trace: Trace) -> str:
     """Call LLM to produce a structured strategy map from the full trace.
 
-    Also queries arxiv for recent papers to seed the 'encouraged directions' section.
+    Also downloads full text of relevant arxiv papers to inspire new directions.
     """
     from rdagent.oai.llm_utils import APIBackend
 
-    active_methods = list({
-        getattr(getattr(exp, "hypothesis", None), "method_type", None)
+    active_methods = " ".join({
+        getattr(getattr(exp, "hypothesis", None), "method_type", None) or ""
         for exp, _ in trace.hist[-10:]
-        if getattr(getattr(exp, "hypothesis", None), "method_type", None)
-    })
-    web_context = _search_arxiv_for_futures(active_methods)
+    }).strip()
+    query = f"index futures intraday signal microstructure {active_methods}".strip()
+    paper_context = _fetch_relevant_papers_text(query, n_papers=2)
+
     full_trace = _format_full_trace_for_meta_llm(trace)
     system_prompt = T("scenarios.futures.prompts:strategy_map_generation.system").r()
     user_prompt = T("scenarios.futures.prompts:strategy_map_generation.user").r(
         full_trace=full_trace,
-        web_context=web_context,
+        web_context=paper_context,
     )
     return APIBackend().build_messages_and_create_chat_completion(user_prompt, system_prompt, json_mode=False)
 
@@ -182,30 +288,6 @@ class FuturesFactorHypothesisGen(FactorHypothesisGen):
         super().__init__(scen)
         self._strategy_map: str = ""        # cached LLM-generated strategy map
         self._strategy_map_round: int = -1  # trace.hist length when map was last generated
-        self._paper_kb = None               # FuturesPaperKnowledgeBase, loaded lazily
-        self._load_paper_kb()
-
-    def _load_paper_kb(self) -> None:
-        from pathlib import Path
-
-        from rdagent.app.futures_rd_loop.conf import FUTURES_FACTOR_PROP_SETTING
-        from rdagent.scenarios.futures.knowledge_management.paper_kb import (
-            FuturesPaperKnowledgeBase,
-        )
-
-        cfg = FUTURES_FACTOR_PROP_SETTING
-        if not cfg.paper_folder:
-            return
-
-        cache = Path(cfg.paper_kb_cache) if cfg.paper_kb_cache else None
-        kb = FuturesPaperKnowledgeBase(path=cache)
-        # PDVectorBase.load() is called in __init__ when path exists; if cache
-        # already had content, vector_df will be populated after load().
-        if kb.shape()[0] == 0:
-            kb.build_from_folder(cfg.paper_folder)
-            if cache:
-                kb.dump()
-        self._paper_kb = kb
 
     def prepare_context(self, trace: Trace) -> Tuple[dict, bool]:
         from rdagent.app.futures_rd_loop.conf import FUTURES_FACTOR_PROP_SETTING
@@ -255,15 +337,6 @@ class FuturesFactorHypothesisGen(FactorHypothesisGen):
                 + ", ".join(exhausted)
             )
             rag_hint += exhausted_note
-
-        # Prepend relevant paper excerpts to rag_hint when paper KB is loaded.
-        if self._paper_kb is not None:
-            paper_ctx = self._paper_kb.retrieve(
-                query=f"Taiwan index futures 1-minute intraday signal {rag_hint[:100]}",
-                topk=3,
-            )
-            if paper_ctx:
-                rag_hint = paper_ctx + "\n\n" + rag_hint
 
         return {
             "hypothesis_and_feedback": hypothesis_and_feedback,
