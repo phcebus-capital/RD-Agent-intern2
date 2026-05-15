@@ -83,7 +83,11 @@ class Graph(KnowledgeBase):
 
     @staticmethod
     def batch_embedding(nodes: list[Node]) -> list[Node]:
-        contents = [node.content for node in nodes]
+        # Match the per-node cap used by KnowledgeMetaData.create_embedding so batch and
+        # individual paths stay consistent; otherwise long reasoning-model outputs
+        # (code+feedback ~25k tokens) blow past OpenAI's 8192-token embedding limit.
+        cap = Node._EMBEDDING_CONTENT_CHAR_CAP
+        contents = [node.content[:cap] for node in nodes]
         # openai create embedding API input's max length is 16
         size = 16
         embeddings = []

@@ -68,7 +68,7 @@ class LiteLLMAPIBackend(APIBackend):
         logger.info(f"{LogColors.CYAN}Token count: {LogColors.END} {num_tokens}", tag="debug_litellm_token")
         return num_tokens
 
-    _EMBEDDING_MAX_TOKENS = 10000
+    _EMBEDDING_MAX_TOKENS = 8000  # OpenAI text-embedding-3-small hard cap is 8192; leave buffer
 
     def _truncate_to_token_limit(self, text: str, max_tokens: int) -> str:
         """Truncate text to fit within the embedding model's token limit."""

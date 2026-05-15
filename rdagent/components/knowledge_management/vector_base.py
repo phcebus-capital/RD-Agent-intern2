@@ -37,6 +37,10 @@ class KnowledgeMetaData:
         self.trunks = split_string_into_chunks(self.content, chunk_size=size)
         self.trunks_embedding = APIBackend().create_embedding(input_content=self.trunks)
 
+    # OpenAI text-embedding-3-small hard cap is 8192 tokens (~32k chars at 4 chars/tok).
+    # Keep embedding input well under that so reasoning-model outputs (long code+feedback) don't blow past it.
+    _EMBEDDING_CONTENT_CHAR_CAP = 24000
+
     def create_embedding(self):
         """
         create content's embedding
@@ -45,7 +49,8 @@ class KnowledgeMetaData:
 
         """
         if self.embedding is None:
-            self.embedding = APIBackend().create_embedding(input_content=self.content)
+            content = self.content[: self._EMBEDDING_CONTENT_CHAR_CAP]
+            self.embedding = APIBackend().create_embedding(input_content=content)
 
     def from_dict(self, data: dict):
         for key, value in data.items():
