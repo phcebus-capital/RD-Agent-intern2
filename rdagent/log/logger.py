@@ -1,3 +1,4 @@
+import atexit
 import os
 import sys
 from contextlib import contextmanager
@@ -72,6 +73,76 @@ class RDAgentLog(SingletonBaseClass):
         self.refresh_storages_from_settings()
 
         self.main_pid = os.getpid()
+        self._metadata_marked = False
+        atexit.register(self._cleanup_on_exit)
+
+    def _collect_run_metadata(self) -> dict[str, str]:
+        """Best-effort collection of per-run metadata.
+
+        The reported ``model`` is *backend-aware*: e.g. the ClaudeCodeSubagent
+        backend ignores ``LITELLM_SETTINGS.chat_model`` and reads
+        ``CLAUDE_CODE_MODEL`` from the environment, so we report that instead.
+        """
+        meta: dict[str, str] = {}
+        backend = ""
+        chat_model = ""
+        try:
+            from rdagent.oai.llm_conf import LLM_SETTINGS
+
+            backend = LLM_SETTINGS.backend
+            chat_model = LLM_SETTINGS.chat_model
+            meta["embedding_model"] = LLM_SETTINGS.embedding_model
+            if LLM_SETTINGS.reasoning_effort:
+                meta["reasoning_effort"] = LLM_SETTINGS.reasoning_effort
+        except Exception:
+            pass
+
+        effective_model = chat_model
+        backend_lower = backend.lower()
+
+        if "litellm" in backend_lower:
+            try:
+                from rdagent.oai.backend.litellm import LITELLM_SETTINGS
+
+                if LITELLM_SETTINGS.chat_model:
+                    effective_model = LITELLM_SETTINGS.chat_model
+                if LITELLM_SETTINGS.chat_model_map:
+                    meta["chat_model_map"] = str(LITELLM_SETTINGS.chat_model_map)
+            except Exception:
+                pass
+        elif "claudecode" in backend_lower.replace("_", "") or "claude_code" in backend_lower:
+            # ClaudeCodeSubagentBackend reads its model from CLAUDE_CODE_MODEL.
+            effective_model = os.environ.get("CLAUDE_CODE_MODEL", "claude-opus-4-7")
+            meta["claude_code_model_env"] = effective_model
+        elif "deprec" in backend_lower:
+            # Legacy DeprecBackend uses LLM_SETTINGS.chat_model directly.
+            effective_model = chat_model
+
+        meta["backend"] = backend
+        meta["model"] = effective_model
+        # Keep chat_model for backwards compatibility with already-written markers.
+        meta["chat_model"] = effective_model
+        meta["recorded_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        return meta
+
+    def _ensure_metadata_marked(self) -> None:
+        if self._metadata_marked:
+            return
+        self._metadata_marked = True
+        if not isinstance(self.storage, FileStorage):
+            return
+        try:
+            self.storage.write_run_metadata(self._collect_run_metadata())
+        except Exception:
+            # Marker is best-effort; never fail logging because of it.
+            pass
+
+    def _cleanup_on_exit(self) -> None:
+        try:
+            if isinstance(self.storage, FileStorage):
+                self.storage.cleanup()
+        except Exception:
+            pass
 
     def refresh_storages_from_settings(self) -> None:
         self.other_storages = []
@@ -109,6 +180,8 @@ class RDAgentLog(SingletonBaseClass):
         for storage in [self.storage] + self.other_storages:
             if hasattr(storage, "path"):
                 storage.path = path
+        # Path moved (e.g. checkout session) — re-mark on the new location.
+        self._metadata_marked = False
 
     def truncate_storages(self, time: datetime) -> None:
         for storage in [self.storage] + self.other_storages:
@@ -130,6 +203,7 @@ class RDAgentLog(SingletonBaseClass):
         return pid_chain
 
     def log_object(self, obj: object, *, tag: str = "") -> None:
+        self._ensure_metadata_marked()
         tag = f"{self._tag}.{tag}.{self.get_pids()}".strip(".")
 
         for storage in [self.storage] + self.other_storages:

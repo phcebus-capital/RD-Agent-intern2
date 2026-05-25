@@ -25,7 +25,7 @@ from rdagent.oai.backend.base import APIBackend
 _NVM_CLAUDE = "/home/intern2/.nvm/versions/node/v24.15.0/bin/claude"
 CLAUDE_BINARY: str = os.environ.get("CLAUDE_BINARY") or shutil.which("claude") or _NVM_CLAUDE
 
-_MODEL = os.environ.get("CLAUDE_CODE_MODEL", "claude-sonnet-4-6")
+_MODEL = os.environ.get("CLAUDE_CODE_MODEL", "claude-opus-4-7")
 _TIMEOUT = int(os.environ.get("CLAUDE_CODE_TIMEOUT", "300"))
 
 

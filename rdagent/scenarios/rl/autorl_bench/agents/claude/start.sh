@@ -2,7 +2,7 @@
 # Claude Code CLI Agent wrapper for AutoRL-Bench
 
 CLAUDE="${CLAUDE_BIN:-claude}"
-CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-4-6}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-7}"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-36000}"
 
 echo "=== Claude CLI Agent ==="

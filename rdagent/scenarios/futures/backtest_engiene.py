@@ -266,28 +266,37 @@ def calc_metrics(
     pf        = wins.sum() / abs(loss.sum()) if loss.sum() != 0 else float("inf")
     payoff    = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf")
 
-    # 淨值序列
-    nav = (equity + config.init_capital) / config.init_capital
-    nav = nav[nav > 0]
-
-    # 最大回撤
-    peak       = nav.cummax()
-    dd_series  = (nav - peak) / peak
-    mdd        = float(dd_series.min())
-
-    # Sharpe（日頻化）
-    daily_nav = nav.resample("1D").last().dropna()
-    daily_ret = daily_nav.pct_change().dropna()
-    sharpe    = (
-        float(daily_ret.mean() / daily_ret.std() * np.sqrt(252))
-        if len(daily_ret) > 1 and daily_ret.std() > 0
+    # ── Sharpe from daily PnL (TWD), NOT from NAV pct_change ──────────────────
+    # Why: NAV-based Sharpe filters out non-positive NAV bars (`nav[nav > 0]`),
+    # so a strategy that goes bankrupt mid-period reports an artificially
+    # positive Sharpe computed only on the pre-bankruptcy slice. For futures
+    # with fixed contract size, daily PnL Sharpe is the correct metric and
+    # captures the full loss profile regardless of capital level.
+    daily_pnl  = equity.diff().fillna(equity.iloc[0]).resample("1D").sum()
+    sharpe     = (
+        float(daily_pnl.mean() / daily_pnl.std() * np.sqrt(252))
+        if len(daily_pnl) > 1 and daily_pnl.std() > 0
         else 0.0
     )
 
-    # CAGR
-    span_days = (nav.index[-1] - nav.index[0]).days
-    total_ret = float(nav.iloc[-1] / nav.iloc[0])
-    cagr      = float(total_ret ** (365.25 / span_days) - 1) if span_days > 0 else 0.0
+    # ── Max drawdown on cumulative PnL (TWD), no filtering ────────────────────
+    # Expressed as fraction of init_capital so it is comparable across runs and
+    # can legitimately exceed -100% (i.e. lost more than initial capital).
+    cum_pnl = equity
+    peak    = cum_pnl.cummax()
+    dd_twd  = (cum_pnl - peak)
+    mdd     = float(dd_twd.min() / config.init_capital)
+
+    # ── CAGR ──────────────────────────────────────────────────────────────────
+    span_days = (cum_pnl.index[-1] - cum_pnl.index[0]).days
+    total_pnl = float(pnl.sum())
+    final_ratio = (total_pnl + config.init_capital) / config.init_capital
+    if span_days > 0 and final_ratio > 0:
+        cagr = float(final_ratio ** (365.25 / span_days) - 1)
+    else:
+        # Bankrupt or negative-equity case: linearised return as proxy
+        cagr = float(total_pnl / config.init_capital * (365.25 / max(span_days, 1)))
+
     calmar    = cagr / abs(mdd) if mdd != 0 else float("inf")
 
     return {

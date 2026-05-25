@@ -192,3 +192,6 @@ AGENTS.md
 !rdagent/**/AGENTS.md
 
 scripts/
+
+# autoresearch run output (可重生的 result.h5，不追蹤)
+autoresearch_runs/

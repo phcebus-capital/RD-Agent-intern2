@@ -71,13 +71,65 @@ SIMILAR_SCENARIOS = (
 )
 
 
+_NOISE_TOPLEVEL = {"debug_tpl", "debug_llm", "MODEL.txt"}
+
+
+def _has_meaningful_output(folder: Path) -> bool:
+    """A run is worth showing only if it logged something beyond debug templates / LLM dumps."""
+    try:
+        for entry in folder.iterdir():
+            if entry.name not in _NOISE_TOPLEVEL:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def filter_log_folders(main_log_path):
     """
     Filter and return the log folders relative to the main log path.
+    Skips runs that crashed before producing any real output (only debug_tpl/debug_llm).
     """
-    folders = [folder.relative_to(main_log_path) for folder in main_log_path.iterdir() if folder.is_dir()]
+    folders = [
+        folder.relative_to(main_log_path)
+        for folder in main_log_path.iterdir()
+        if folder.is_dir() and _has_meaningful_output(folder)
+    ]
     folders = sorted(folders, key=lambda x: x.name)
     return folders
+
+
+def read_run_model_info(run_root: Path) -> dict[str, str] | None:
+    """Parse the MODEL.txt marker written at run start. Returns None if missing/unreadable."""
+    marker = run_root / "MODEL.txt"
+    if not marker.is_file():
+        return None
+    try:
+        info: dict[str, str] = {}
+        for line in marker.read_text(encoding="utf-8").splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                info[k.strip()] = v.strip()
+        return info or None
+    except Exception:
+        return None
+
+
+def derive_effective_model(info: dict[str, str]) -> str:
+    """Return the model name that actually drove the run, given the backend in MODEL.txt.
+
+    Older markers stored only `chat_model`, which is wrong for backends that bypass
+    LiteLLM (e.g. ClaudeCodeSubagentBackend reads `CLAUDE_CODE_MODEL`). For those we
+    fall back to a backend-specific label rather than parroting `chat_model`.
+    """
+    if "model" in info and info["model"]:
+        return info["model"]
+    backend = info.get("backend", "")
+    bl = backend.lower().replace("_", "")
+    if "claudecode" in bl:
+        # Legacy markers don't preserve CLAUDE_CODE_MODEL; show it as Claude Code.
+        return info.get("claude_code_model_env", "claude (Claude Code subagent)")
+    return info.get("chat_model", "?")
 
 
 if "log_path" not in state:
@@ -776,6 +828,20 @@ with st.sidebar:
                 st.selectbox(f"**Select from `{main_log_path}`**", folders, key="log_path", on_change=refresh)
         else:
             st.text_input(":blue[**log path**]", key="log_path", on_change=refresh)
+
+        # Show the model recorded for this run (written by FileStorage at run start).
+        if state.log_path:
+            run_root = (main_log_path / state.log_path) if main_log_path else Path(state.log_path)
+            model_info = read_run_model_info(run_root)
+            if model_info:
+                effective_model = derive_effective_model(model_info)
+                backend = model_info.get("backend", "?")
+                st.markdown(f":green[**Model:**] `{effective_model}`")
+                st.caption(f"Backend: `{backend}`")
+                with st.expander("Run metadata"):
+                    st.json(model_info)
+            else:
+                st.caption(":grey[No `MODEL.txt` recorded for this run.]")
 
     c1, c2 = st.columns([1, 1], vertical_alignment="center")
     with c1:

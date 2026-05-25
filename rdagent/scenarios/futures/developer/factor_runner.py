@@ -19,7 +19,6 @@ Backtest model:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import numpy as np
@@ -35,24 +34,60 @@ from rdagent.scenarios.futures.experiment import FuturesFactorExperiment
 
 # ─────────────────────── Look-ahead bias detection ───────────────────────
 
+_LOOKAHEAD_SYSTEM_PROMPT = """\
+You are an expert quantitative researcher reviewing 1-minute futures factor code
+for look-ahead bias.
+
+**Definition.** A factor has look-ahead bias iff the signal value at bar t
+depends on data from any bar t' > t. Otherwise it is safe.
+
+**Method.** Trace the data flow before deciding. Find where `signal` (or the
+final saved Series) gets its values, then walk backwards through every variable
+that feeds it. For each line that involves groupby / map / cumulative ops /
+shifts, ask: at bar t, can this expression read from a bar t' > t?
+
+**Key nuance — shift chains are protective.**
+A `series.groupby(key).agg()` followed by `key.map(result)` is NOT automatically
+biased. Check whether `key` and `result` are both shift(1)-protected so that
+each bar only ever sees values derived from strictly earlier bars. If either
+the key OR the values are taken from the past (`.shift(1)`, `.cummax()` etc.),
+the pattern is safe even though it looks like a full-day broadcast.
+
+**Decision rule.** Default to `has_bias = false`. Only flag `true` if you can
+name the SPECIFIC line of code that reads future data. Cite that line in
+`reason`. If a suspicious-looking pattern turns out to be shift-protected,
+explicitly say so in `reason`.
+
+Reply with JSON only:
+{"has_bias": true|false, "reason": "<cite the specific offending line OR \
+explain why the suspicious pattern is shift-protected>"}
+"""
+
+
 def _detect_lookahead_bias(code: str) -> bool:
     """
-    Detect common look-ahead bias patterns in factor code.
-
-    Flags: groupby(date).transform() on OHLCV columns, which uses the
-    full day's high/low/open/close at every bar — information not yet
-    available at the time the bar is generated.
+    Use an LLM to detect look-ahead bias in factor code.
+    Returns False (assume safe) if the LLM call fails.
     """
-    # Pattern: .groupby(<anything containing date/Date>).transform(
-    patterns = [
-        r'\.groupby\s*\([^)]*\.date\b[^)]*\)\s*\.transform\s*\(',
-        r'\.groupby\s*\([^)]*date[^)]*\)\s*\.transform\s*\(',
-        r'groupby\s*\(\s*["\']date["\']\s*\)\s*\.transform\s*\(',
-    ]
-    for p in patterns:
-        if re.search(p, code, re.IGNORECASE):
-            return True
-    return False
+    try:
+        import json
+        from rdagent.oai.llm_utils import APIBackend
+
+        response = APIBackend().build_messages_and_create_chat_completion(
+            user_prompt=f"Review this factor code for look-ahead bias:\n\n```python\n{code}\n```",
+            system_prompt=_LOOKAHEAD_SYSTEM_PROMPT,
+            json_mode=True,
+        )
+        result = json.loads(response)
+        has_bias = bool(result.get("has_bias", False))
+        reason   = result.get("reason", "")
+        if has_bias:
+            logger.warning(f"LLM detected look-ahead bias: {reason}")
+        return has_bias
+
+    except Exception as e:
+        logger.warning(f"LLM look-ahead check failed ({e}); assuming no bias.")
+        return False
 
 
 # ─────────────────────── Signal normalisation ────────────────────────────
@@ -90,111 +125,105 @@ def _normalize_signal(signal: pd.Series) -> pd.Series:
 
 
 # ─────────────────────── Backtest engine ─────────────────────────────────
+# Single source of truth: delegate to the reference backtest_engiene.
+# Two engines giving different results caused weeks of bad evaluation
+# (factors with positive reported Sharpe but no actual edge). Avoid that
+# by always using the same engine that's used in the manual notebook.
+
+from rdagent.scenarios.futures.backtest_engiene import (
+    BacktestConfig as _BTConfig,
+    run_backtest as _engine_bt,
+    calc_metrics as _engine_metrics,
+)
+
 
 def run_backtest(df: pd.DataFrame, signal: pd.Series, cost_pts: float = 1.525) -> dict:
     """
-    Vectorized position-based backtest for 1-min TX futures.
+    Run the reference backtest_engiene and return metrics in factor_runner's
+    expected dict format.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        1-min OHLCV data with 'session' column and DatetimeIndex.
-    signal : pd.Series
-        Raw signal values (same index as df). Positive=long, negative=short.
-    cost_pts : float
-        Cost per side in index points:
-          1.525 pts = (105 NTD commission + 200 NTD slippage) ÷ 200 NTD/pt
-
-    Returns
-    -------
-    dict with keys: sharpe, annual_return_pts, max_drawdown_pts,
-                    n_trades, day_sharpe, night_sharpe
+    cost_pts (single-side, in index points) maps to backtest_engiene config:
+      cost_pts = (fee_per_side + slippage_ticks * tick_value) / point_value
+    Default 1.525 pts = (105 + 200) / 200 → fee=105, slip=1×200, point_value=200.
     """
-    # ── Align ──────────────────────────────────────────────────────────
-    sig = signal.reindex(df.index).fillna(0)
-    pos = np.sign(sig)
+    BacktestConfig, calc_metrics = _BTConfig, _engine_metrics
 
-    # 每日部位歸零 = No: positions carry freely across session and day boundaries.
-    pos_adj = pos.copy()
+    # Back-derive fee from cost_pts assuming slippage = 1 tick × 200 NTD = 200 NTD.
+    cost_per_side_twd = cost_pts * 200.0
+    fee_per_side = max(0, int(round(cost_per_side_twd - 200.0)))
 
-    # ── Next-open execution model ──────────────────────────────────────
-    # Signal confirmed at close of bar t  → trade executes at open of bar t+1.
-    # executed_pos[t] = position held DURING bar t = pos_adj[t-1]
-    executed_pos = pos_adj.shift(1).fillna(0.0)
-
-    # Did the position change at the open of bar t?
-    prev_executed = executed_pos.shift(1).fillna(0.0)
-    entry_bar = (executed_pos != prev_executed)
-
-    # P&L on entry bars: new_pos × (close[t] - open[t])   (entered at open)
-    # P&L on hold  bars: old_pos × (close[t] - close[t-1])
-    open_to_close = (df["close"] - df["open"])
-    close_to_close = df["close"].diff().fillna(0.0)
-
-    hold_pnl = (
-        executed_pos * open_to_close  * entry_bar.astype(float)
-        + executed_pos * close_to_close * (~entry_bar).astype(float)
+    cfg = BacktestConfig(
+        point_value=200,
+        fee_per_side=fee_per_side,
+        slippage_ticks=1,
+        tick_value=200,
+        contracts=1,
+        execution="next_open",
+        stop_loss_points=None,
+        take_profit_points=None,
+        max_hold_bars=None,
+        session_filter=None,
+        init_capital=1_000_000,
     )
 
-    # Transaction cost: paid whenever executed position changes
-    pos_chg = (executed_pos - prev_executed)
-    cost = pos_chg.abs() * cost_pts
+    # Match the notebook's behaviour: pass the raw combined signal through.
+    # The engine casts each bar with `int(sig_arr[i])`, so fractional votes
+    # (e.g. 1-of-8 sub-tasks agreeing → 0.125) are truncated to flat. Applying
+    # `sign()` here would instead treat any non-zero vote as a full ±1 entry,
+    # inflating trade count and diverging from the notebook backtest.
+    sig = signal.reindex(df.index).fillna(0)
 
-    net_pnl = hold_pnl - cost
-
-    # ── Cumulative metrics ─────────────────────────────────────────────
-    cum_pnl = net_pnl.cumsum()
-    total_pts = float(cum_pnl.iloc[-1]) if len(cum_pnl) > 0 else 0.0
+    trades_df, equity = _engine_bt(df, sig, cfg)
 
     n_days = max(1, (df.index[-1] - df.index[0]).days)
-    n_years = n_days / 365.0
-    annual_return = total_pts / n_years
+    if len(trades_df) < 1:
+        return {
+            "sharpe": 0.0, "annual_return_pts": 0.0,
+            "max_drawdown_pts": 0.0, "n_trades": 0,
+            "day_sharpe": 0.0, "night_sharpe": 0.0,
+            "year_sharpes": {}, "n_positive_years": 0,
+        }
 
-    # Max drawdown (in index points on cumulative P&L curve)
-    max_drawdown = float((cum_pnl - cum_pnl.cummax()).min())
+    m = calc_metrics(trades_df, equity, cfg)
 
-    # Annualised Sharpe — daily equity return basis (industry standard, matches notebook)
-    # Aggregate 1-min P&L to calendar-day totals, then compute daily return Sharpe × √252.
-    # This gives a fair comparison across strategies with different market-exposure ratios.
-    bars_per_year = 300 * 250  # kept for year-by-year calculation below
-    daily_pnl = net_pnl.resample("1D").sum()
-    daily_std = float(daily_pnl.std())
-    sharpe = float(daily_pnl.mean() / daily_std * np.sqrt(252)) if daily_std > 0 else 0.0
+    # PnL converted to points (equity is cumulative TWD; point_value = 200 NTD/pt)
+    cum_pnl_pts = equity / cfg.point_value
+    maxdd_pts = float((cum_pnl_pts - cum_pnl_pts.cummax()).min())
+    annual_pts = m["total_pnl_twd"] / (n_days / 365.0) / cfg.point_value
 
-    # Trade count: number of position-change events (open+close = 2 events per round-trip)
-    n_trades = int((pos_chg.abs() > 0).sum() // 2)
-
-    # ── Session breakdown (daily Sharpe per session) ──────────────────
-    def _session_sharpe(mask: pd.Series) -> float:
-        daily_s = net_pnl[mask].resample("1D").sum()
-        sd = float(daily_s.std())
-        return float(daily_s.mean() / sd * np.sqrt(252)) if sd > 0 else 0.0
-
-    day_mask = df["session"] == "day"
-    night_mask = df["session"] == "night"
-    day_sharpe = _session_sharpe(day_mask)
-    night_sharpe = _session_sharpe(night_mask)
-
-    # ── Year-by-year Sharpe (daily basis, consistent with overall Sharpe) ────
+    # Year-by-year Sharpe from trade-level daily PnL
+    daily_pnl = trades_df.set_index("exit_time")["pnl_twd"].resample("1D").sum()
     year_sharpes: dict[str, float] = {}
     for yr, grp in daily_pnl.groupby(daily_pnl.index.year):
-        sd_yr = float(grp.std())
-        if sd_yr > 0:
-            year_sharpes[str(yr)] = round(float(grp.mean() / sd_yr * np.sqrt(252)), 3)
-        else:
-            year_sharpes[str(yr)] = 0.0
-
+        sd = float(grp.std())
+        year_sharpes[str(yr)] = round(float(grp.mean() / sd * np.sqrt(252)), 3) if sd > 0 else 0.0
     n_positive_years = sum(1 for v in year_sharpes.values() if v > 0)
 
+    # Day / night Sharpe: classify each trade by its exit_time session
+    def _split_sharpe(mask: pd.Series) -> float:
+        sub = trades_df.loc[mask]
+        if len(sub) == 0:
+            return 0.0
+        d = sub.set_index("exit_time")["pnl_twd"].resample("1D").sum()
+        sd = float(d.std())
+        return round(float(d.mean() / sd * np.sqrt(252)), 3) if sd > 0 else 0.0
+
+    if "session" in df.columns:
+        session_at_exit = df["session"].reindex(trades_df["exit_time"]).values
+        day_sharpe   = _split_sharpe(session_at_exit == "day")
+        night_sharpe = _split_sharpe(session_at_exit == "night")
+    else:
+        day_sharpe = night_sharpe = 0.0
+
     return {
-        "sharpe": round(sharpe, 3),
-        "annual_return_pts": round(annual_return, 1),
-        "max_drawdown_pts": round(max_drawdown, 1),
-        "n_trades": n_trades,
-        "day_sharpe": round(day_sharpe, 3),
-        "night_sharpe": round(night_sharpe, 3),
-        "year_sharpes": year_sharpes,
-        "n_positive_years": n_positive_years,
+        "sharpe"            : round(m["sharpe"], 3),
+        "annual_return_pts" : round(annual_pts, 1),
+        "max_drawdown_pts"  : round(maxdd_pts, 1),
+        "n_trades"          : int(m["total_trades"]),
+        "day_sharpe"        : day_sharpe,
+        "night_sharpe"      : night_sharpe,
+        "year_sharpes"      : year_sharpes,
+        "n_positive_years"  : n_positive_years,
     }
 
 
@@ -229,8 +258,16 @@ class FuturesFactorRunner(CachedRunner[FuturesFactorExperiment]):
 
     def get_cache_key(self, exp: FuturesFactorExperiment) -> str:
         """
-        Include test period and cost in the cache key so that changing
-        test_start / test_end / cost_pts invalidates all cached results.
+        Cache key includes:
+          - task metadata (from super)
+          - test period / cost (changing these invalidates)
+          - factor.py contents of every sub_workspace (so a regenerated
+            factor.py with the same task info but different code gets a
+            fresh cache entry — previously this caused stale metrics to
+            be reported when the workspace's result.h5 was overwritten
+            by a later run with the same MD5-hashed code dir)
+          - baseline workspace code (so changing baseline_factor.py
+            invalidates downstream caches that compared against it)
         """
         from rdagent.oai.llm_utils import md5_hash
 
@@ -240,9 +277,23 @@ class FuturesFactorRunner(CachedRunner[FuturesFactorExperiment]):
         settings_suffix = (
             f"|test_start={FUTURES_FACTOR_PROP_SETTING.test_start}"
             f"|test_end={FUTURES_FACTOR_PROP_SETTING.test_end}"
-            f"|cost_pts={run_backtest.__defaults__[0]}"  # cost_pts default from signature
+            f"|cost_pts={run_backtest.__defaults__[0]}"
+            f"|pipeline_v=2"  # v2 = raw signal (notebook-aligned); v1 = sign-cast
         )
-        return md5_hash(base_key + settings_suffix)
+
+        code_chunks: list[str] = []
+        for ws in exp.sub_workspace_list:
+            if ws is not None:
+                code = getattr(ws, "file_dict", {}).get("factor.py", "")
+                code_chunks.append(code)
+        for based_exp in exp.based_experiments:
+            for ws in based_exp.sub_workspace_list:
+                if ws is not None:
+                    code = getattr(ws, "file_dict", {}).get("factor.py", "")
+                    code_chunks.append(code)
+        code_suffix = "|code=" + md5_hash("\n---\n".join(code_chunks))
+
+        return md5_hash(base_key + settings_suffix + code_suffix)
 
     @cache_with_pickle(get_cache_key, CachedRunner.assign_cached_result)
     def develop(self, exp: FuturesFactorExperiment) -> FuturesFactorExperiment:
@@ -260,14 +311,17 @@ class FuturesFactorRunner(CachedRunner[FuturesFactorExperiment]):
             exp.based_experiments[-1] = self.develop(exp.based_experiments[-1])
 
         # ── Detect look-ahead bias across all workspaces ─────────────
+        # Skip for user-provided baseline (hypothesis is None) — the user is
+        # responsible for their own baseline code correctness.
         has_lookahead = False
-        for ws in exp.sub_workspace_list:
-            if ws is not None:
-                code = getattr(ws, "file_dict", {}).get("factor.py", "")
-                if code and _detect_lookahead_bias(code):
-                    has_lookahead = True
-                    logger.warning("Look-ahead bias detected in factor code (groupby date + transform).")
-                    break
+        if exp.hypothesis is not None:
+            for ws in exp.sub_workspace_list:
+                if ws is not None:
+                    code = getattr(ws, "file_dict", {}).get("factor.py", "")
+                    if code and _detect_lookahead_bias(code):
+                        has_lookahead = True
+                        logger.warning("LLM detected look-ahead bias in factor code.")
+                        break
 
         # ── Execute each sub_workspace on full data ───────────────────
         signals: list[pd.Series] = []

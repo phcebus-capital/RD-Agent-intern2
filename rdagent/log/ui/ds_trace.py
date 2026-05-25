@@ -1154,6 +1154,30 @@ with st.sidebar:
             f"Select from :blue[**{state.log_folder.absolute()}**]", folders, index=default_index
         )
 
+        if state.log_path:
+            _marker = state.log_folder / state.log_path / "MODEL.txt"
+            if _marker.is_file():
+                _info: dict[str, str] = {}
+                for _line in _marker.read_text(encoding="utf-8").splitlines():
+                    if ":" in _line:
+                        _k, _v = _line.split(":", 1)
+                        _info[_k.strip()] = _v.strip()
+                if _info:
+                    _backend = _info.get("backend", "")
+                    _bl = _backend.lower().replace("_", "")
+                    if _info.get("model"):
+                        _effective = _info["model"]
+                    elif "claudecode" in _bl:
+                        _effective = _info.get("claude_code_model_env", "claude (Claude Code subagent)")
+                    else:
+                        _effective = _info.get("chat_model", "?")
+                    st.markdown(f":green[**Model:**] `{_effective}`")
+                    st.caption(f"Backend: `{_backend or '?'}`")
+                    with st.expander("Run metadata"):
+                        st.json(_info)
+            else:
+                st.caption(":grey[No `MODEL.txt` recorded for this run.]")
+
         if st.button("Refresh Data"):
             if state.log_path is None:
                 st.toast("Please select a log path first!", icon="🟡")

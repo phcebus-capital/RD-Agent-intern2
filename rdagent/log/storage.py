@@ -1,6 +1,8 @@
 import json
 import pickle
 import re
+import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Literal
@@ -9,6 +11,21 @@ from .base import Message, Storage
 from .utils import gen_datetime
 
 LOG_LEVEL = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+RUN_METADATA_FILENAME = "MODEL.txt"
+
+# Top-level entries that don't, by themselves, indicate a meaningful run.
+# A folder containing only these gets removed at process exit.
+_NOISE_TOPLEVEL = frozenset({"debug_tpl", "debug_llm", RUN_METADATA_FILENAME})
+
+
+class _CompatUnpickler(pickle.Unpickler):
+    # Python 3.13 moved pathlib classes into the pathlib._local submodule.
+    # Pickles created under 3.13+ store that module path and fail to load under <=3.12.
+    def find_class(self, module: str, name: str) -> Any:
+        if module == "pathlib._local" and sys.version_info < (3, 13):
+            module = "pathlib"
+        return super().find_class(module, name)
 
 
 def _remove_empty_dir(path: Path) -> None:
@@ -22,7 +39,24 @@ def _remove_empty_dir(path: Path) -> None:
             _remove_empty_dir(sub)
 
         if not any(path.iterdir()):
-            path.rmdir()
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+
+def _has_run_data(path: Path) -> bool:
+    """Return True if the run folder produced any *meaningful* output.
+
+    Folders containing only the model marker, ``debug_tpl/``, and/or ``debug_llm/``
+    are treated as crashed-before-real-work and removed by ``FileStorage.cleanup``.
+    """
+    if not path.is_dir():
+        return False
+    for entry in path.iterdir():
+        if entry.name not in _NOISE_TOPLEVEL:
+            return True
+    return False
 
 
 class FileStorage(Storage):
@@ -34,6 +68,23 @@ class FileStorage(Storage):
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+
+    def write_run_metadata(self, lines: dict[str, str]) -> Path:
+        """Write a small marker file at the storage root recording per-run metadata (model, etc.)."""
+        self.path.mkdir(parents=True, exist_ok=True)
+        marker = self.path / RUN_METADATA_FILENAME
+        body = "\n".join(f"{k}: {v}" for k, v in lines.items()) + "\n"
+        marker.write_text(body, encoding="utf-8")
+        return marker
+
+    def cleanup(self) -> None:
+        """Remove the run folder if it has no logged data; otherwise prune empty subdirs."""
+        if not self.path.exists():
+            return
+        if not _has_run_data(self.path):
+            shutil.rmtree(self.path, ignore_errors=True)
+            return
+        _remove_empty_dir(self.path)
 
     def log(
         self,
@@ -47,9 +98,8 @@ class FileStorage(Storage):
         timestamp = gen_datetime(timestamp)
 
         cur_p = self.path / tag.replace(".", "/")
-        cur_p.mkdir(parents=True, exist_ok=True)
-
         path = cur_p / f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S-%f')}.log"
+        cur_p.mkdir(parents=True, exist_ok=True)
 
         if save_type == "json":
             path = path.with_suffix(".json")
@@ -92,7 +142,7 @@ class FileStorage(Storage):
             pid = file.parent.name
 
             with file.open("rb") as f:
-                content = pickle.load(f)
+                content = _CompatUnpickler(f).load()
 
             timestamp = datetime.strptime(file.stem, "%Y-%m-%d_%H-%M-%S-%f").replace(tzinfo=timezone.utc)
 
